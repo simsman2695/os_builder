@@ -1,0 +1,7 @@
+NAME="cpedgeOS"
+PRETTY_NAME="cpedgeOS 24.04"
+VERSION_ID="24.04"
+VERSION="24.04"
+ID=cpedgeos
+ID_LIKE=ubuntu
+HOME_URL="https://github.com/cpedge"

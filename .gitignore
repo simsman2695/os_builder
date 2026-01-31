@@ -1,0 +1,13 @@
+# Build temporaries
+tmp/
+
+# Downloaded archives
+*.tar.gz
+*.tar.xz
+
+# Build logs
+logs/
+
+# Output images (produced in ../os_images/)
+*.img
+*.img.gz

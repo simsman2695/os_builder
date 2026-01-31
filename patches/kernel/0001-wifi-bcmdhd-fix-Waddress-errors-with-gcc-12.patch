@@ -1,0 +1,26 @@
+diff --git a/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android.c b/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android.c
+index ae863e1f653c..5d67de10722b 100755
+--- a/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android.c
++++ b/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android.c
+@@ -12057,7 +12057,7 @@ wl_handle_private_cmd(struct net_device *net, char *command, u32 cmd_len)
+ 		if ((rev_info_delim) &&
+ 			(strnicmp(rev_info_delim, CMD_COUNTRY_DELIMITER,
+ 			strlen(CMD_COUNTRY_DELIMITER)) == 0) &&
+-			(rev_info_delim + 1)) {
++			(*(rev_info_delim + 1) != '\0')) {
+ 			revinfo  = bcm_atoi(rev_info_delim + 1);
+ 		} else {
+ 			revinfo = 0;
+diff --git a/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android_ext.c b/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android_ext.c
+index 4b884dfc5427..6ea51311a262 100755
+--- a/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android_ext.c
++++ b/drivers/net/wireless/rockchip_wlan/rkwifi/bcmdhd/wl_android_ext.c
+@@ -2636,7 +2636,7 @@ wl_ext_get_country(struct net_device *dev, char *data, char *command,
+ 		char *rev_info_delim = country_code + 2; /* 2 bytes of country code */
+ 		int revinfo = 0;
+ 		if ((rev_info_delim) &&
+-			(strnicmp(rev_info_delim, "/", strlen("/")) == 0) && (rev_info_delim + 1)) {
++			(strnicmp(rev_info_delim, "/", strlen("/")) == 0) && (*(rev_info_delim + 1) != '\0')) {
+ 			revinfo  = bcm_atoi(rev_info_delim + 1);
+ 		}
+ #ifdef WL_CFG80211
