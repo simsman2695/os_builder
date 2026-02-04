@@ -13,6 +13,17 @@ ensure_dir "$TMP_DIR"
 IDBLOADER="${TMP_DIR}/idbloader.img"
 UBOOT_ITB="${TMP_DIR}/u-boot.itb"
 
+# ── --prebuilt-uboot flag overrides URLs with known-good binaries ────────────
+if [[ "${USE_PREBUILT_UBOOT:-false}" == "true" ]]; then
+    log_info "Using prebuilt U-Boot binaries (--prebuilt-uboot)"
+    UBOOT_IDBLOADER_URL="${UBOOT_PREBUILT_IDBLOADER_URL:-}"
+    UBOOT_ITB_URL="${UBOOT_PREBUILT_ITB_URL:-}"
+    [[ -n "$UBOOT_IDBLOADER_URL" && -n "$UBOOT_ITB_URL" ]] \
+        || die "UBOOT_PREBUILT_IDBLOADER_URL / UBOOT_PREBUILT_ITB_URL not set in board config"
+    # Remove cached source-built binaries so we download fresh
+    rm -f "$IDBLOADER" "$UBOOT_ITB"
+fi
+
 # ── option 1: download prebuilt binaries ─────────────────────────────────────
 if [[ -n "${UBOOT_IDBLOADER_URL:-}" && -n "${UBOOT_ITB_URL:-}" ]]; then
     if [[ ! -f "$IDBLOADER" ]]; then

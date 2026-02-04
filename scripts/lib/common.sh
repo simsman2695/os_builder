@@ -60,6 +60,18 @@ load_config() {
     RKBIN_SRC="$(cd "${BUILDER_DIR}" && realpath -m "${RKBIN_SRC}")"
     TMP_DIR="${BUILDER_DIR}/tmp/${board}"
 
+    # Auto-detect kernel version from source tree Makefile
+    if [[ "${KERNEL_VERSION}" == "auto" ]]; then
+        local kmakefile="${KERNEL_SRC}/Makefile"
+        [[ -f "$kmakefile" ]] || die "KERNEL_VERSION=auto but ${kmakefile} not found"
+        local _ver _patch _sub
+        _ver="$(sed -n  's/^VERSION *= *//p'    "$kmakefile")"
+        _patch="$(sed -n 's/^PATCHLEVEL *= *//p' "$kmakefile")"
+        _sub="$(sed -n  's/^SUBLEVEL *= *//p'   "$kmakefile")"
+        KERNEL_VERSION="${_ver}.${_patch}.${_sub}"
+        log_info "Auto-detected kernel version: ${KERNEL_VERSION}"
+    fi
+
     # Derived paths
     KERNEL_OUT="${KERNELS_OUT}/${KERNEL_VERSION}/${BOARD_CHIP}"
     IMAGE_OUT="${IMAGES_OUT}/${KERNEL_VERSION}/${BOARD_CHIP}"

@@ -2,10 +2,14 @@
 # build.sh — main entry point for the RK3588 OS builder
 #
 # Usage:
-#   ./build.sh <board> [stage ...]
+#   ./build.sh [options] <board> [stage ...]
+#
+# Options:
+#   --prebuilt-uboot   Use known-good prebuilt U-Boot instead of building from source
 #
 # Examples:
 #   ./build.sh rock-5b                          # run all stages
+#   ./build.sh --prebuilt-uboot rock-5b         # use prebuilt U-Boot binaries
 #   ./build.sh rock-5b prerequisites            # check host tools only
 #   ./build.sh rock-5b fetch-dts kernel         # fetch DTS + build kernel
 #   ./build.sh rock-5b rootfs image             # customize rootfs + assemble image
@@ -16,7 +20,7 @@
 #   kernel          02 — cross-compile kernel Image, DTBs, modules
 #   download-rootfs 03 — download Ubuntu arm64 base tarball
 #   rootfs          04 — extract, chroot, customise rootfs       [sudo]
-#   uboot           05 — fetch prebuilt U-Boot binaries (stub)
+#   uboot           05 — build or fetch U-Boot bootloader
 #   image           06 — assemble raw dd-able .img               [sudo]
 
 set -euo pipefail
@@ -56,9 +60,19 @@ usage() {
 }
 
 # ── parse args ───────────────────────────────────────────────────────────────
+USE_PREBUILT_UBOOT=false
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --prebuilt-uboot) USE_PREBUILT_UBOOT=true; shift ;;
+        *) echo "Error: Unknown option '$1'"; usage ;;
+    esac
+done
+
 BOARD="${1:-}"
 [[ -z "$BOARD" ]] && usage
 shift
+
+export USE_PREBUILT_UBOOT
 
 # Validate board config exists
 [[ -f "${BUILDER_DIR}/config/boards/${BOARD}.conf" ]] \

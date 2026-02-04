@@ -58,6 +58,12 @@ done
 log_info "Formatting ${PART_DEV} as ${ROOTFS_FSTYPE} ..."
 mkfs.ext4 -L "$ROOTFS_LABEL" -q "$PART_DEV"
 
+# ── get PARTUUID of the new partition ────────────────────────────────────────
+# The kernel needs PARTUUID to find root without an initramfs (LABEL= requires
+# userspace tools). We use sfdisk to extract the partition UUID from the GPT.
+PART_UUID="$(sfdisk --part-uuid "$LOOP_DEV" 1)"
+log_info "Partition UUID: ${PART_UUID}"
+
 # ── mount and copy rootfs ───────────────────────────────────────────────────
 MNT="${TMP_DIR}/mnt"
 ensure_dir "$MNT"
@@ -66,6 +72,18 @@ cleanup_push "umount -lf ${MNT}"
 
 log_info "Copying rootfs into image (this may take a while) ..."
 rsync -aHAX "${ROOTFS_DIR}/" "${MNT}/"
+
+# ── generate extlinux.conf with PARTUUID ─────────────────────────────────────
+log_info "Generating /boot/extlinux/extlinux.conf ..."
+ensure_dir "${MNT}/boot/extlinux"
+cat > "${MNT}/boot/extlinux/extlinux.conf" <<EOF
+default linux-${KERNEL_VERSION}
+label linux-${KERNEL_VERSION}
+    kernel /boot/Image
+    fdt /boot/${DTB_TARGETS[0]}
+    append root=PARTUUID=${PART_UUID} rootfstype=${ROOTFS_FSTYPE} rootwait rw console=${SERIAL_TTY},${SERIAL_BAUD}n8 console=tty1
+EOF
+
 sync
 
 # ── unmount ──────────────────────────────────────────────────────────────────

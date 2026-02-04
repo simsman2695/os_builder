@@ -31,6 +31,14 @@ log_info "Configuring: ${KERNEL_DEFCONFIG}"
 make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
     "${KERNEL_DEFCONFIG}"
 
+# ── merge config fragments (if any) ─────────────────────────────────────────
+if [[ -v KERNEL_CONFIG_FRAGMENTS && ${#KERNEL_CONFIG_FRAGMENTS[@]} -gt 0 ]]; then
+    log_info "Merging config fragments: ${KERNEL_CONFIG_FRAGMENTS[*]}"
+    ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
+        scripts/kconfig/merge_config.sh -m .config "${KERNEL_CONFIG_FRAGMENTS[@]}"
+    make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" olddefconfig
+fi
+
 # ── build Image ──────────────────────────────────────────────────────────────
 log_info "Building Image (${MAKE_JOBS} jobs) ..."
 make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \

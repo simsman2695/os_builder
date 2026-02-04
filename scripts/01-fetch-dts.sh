@@ -8,6 +8,12 @@ load_config "$BOARD"
 
 log_step "Fetching DTS for ${BOARD_NAME}"
 
+# ── skip if no DTS files need fetching (kernel has them built-in) ─────────
+if [[ ${#DTS_FILES[@]} -eq 0 ]]; then
+    log_info "DTS_FILES is empty — kernel tree already contains DTS. Skipping."
+    exit 0
+fi
+
 DTS_DIR="${KERNEL_SRC}/arch/arm64/boot/dts/rockchip"
 ensure_dir "$DTS_DIR"
 

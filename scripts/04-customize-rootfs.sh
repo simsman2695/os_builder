@@ -110,6 +110,12 @@ chroot "$ROOTFS_DIR" /bin/bash -e <<CHROOTEOF
 systemctl enable getty@tty1.service 2>/dev/null || true
 CHROOTEOF
 
+# ── chroot: mask services that block boot without network ─────────────────
+log_info "Masking systemd-networkd-wait-online (prevents infinite boot hang without DHCP) ..."
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
+CHROOTEOF
+
 # ── install Mali GPU userspace (download on host, copy into rootfs) ──────────
 log_info "Installing Mali GPU userspace (libmali-valhall-g610) ..."
 MALI_DL="${TMP_DIR}/libmali-valhall-g610.so"
@@ -174,15 +180,10 @@ if [[ -d "${KERNEL_OUT}/modules/lib/modules" ]]; then
     rsync -a "${KERNEL_OUT}/modules/lib/modules/" "${ROOTFS_DIR}/lib/modules/"
 fi
 
-# ── generate extlinux.conf ──────────────────────────────────────────────────
-log_info "Generating /boot/extlinux/extlinux.conf ..."
+# ── extlinux.conf is generated in 06-assemble-image.sh ──────────────────────
+# The PARTUUID isn't known until the GPT partition is created, so extlinux.conf
+# must be generated during image assembly, not here.
 ensure_dir "${ROOTFS_DIR}/boot/extlinux"
-cat > "${ROOTFS_DIR}/boot/extlinux/extlinux.conf" <<EOF
-label linux-${KERNEL_VERSION}
-    kernel /boot/Image
-    fdt /boot/${DTB_TARGETS[0]}
-    append root=LABEL=${ROOTFS_LABEL} rootfstype=${ROOTFS_FSTYPE} rootwait rw console=${SERIAL_TTY},${SERIAL_BAUD}n8 console=tty1 earlycon
-EOF
 
 # ── apply overlay files ─────────────────────────────────────────────────────
 OVERLAY_DIR="${BUILDER_DIR}/overlay/${BOARD}"
