@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# resize-rootfs — grow root partition and filesystem to fill the entire disk
+# Intended to run once on first boot via systemd oneshot service.
+set -e
+
+MARKER="/var/lib/resize-rootfs/done"
+
+# Already done?
+[[ -f "$MARKER" ]] && exit 0
+
+echo "resize-rootfs: detecting root device ..."
+
+# Find the block device backing /
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+if [[ -z "$ROOT_DEV" ]]; then
+    echo "ERROR: cannot determine root device" >&2
+    exit 1
+fi
+
+# Parse disk device and partition number
+# /dev/mmcblk0p1 → disk=/dev/mmcblk0  part=1
+# /dev/nvme0n1p1 → disk=/dev/nvme0n1  part=1
+# /dev/sda1      → disk=/dev/sda      part=1
+if [[ "$ROOT_DEV" =~ ^(/dev/mmcblk[0-9]+)p([0-9]+)$ ]]; then
+    DISK="${BASH_REMATCH[1]}"
+    PARTNUM="${BASH_REMATCH[2]}"
+elif [[ "$ROOT_DEV" =~ ^(/dev/nvme[0-9]+n[0-9]+)p([0-9]+)$ ]]; then
+    DISK="${BASH_REMATCH[1]}"
+    PARTNUM="${BASH_REMATCH[2]}"
+elif [[ "$ROOT_DEV" =~ ^(/dev/[a-z]+)([0-9]+)$ ]]; then
+    DISK="${BASH_REMATCH[1]}"
+    PARTNUM="${BASH_REMATCH[2]}"
+else
+    echo "ERROR: cannot parse root device: $ROOT_DEV" >&2
+    exit 1
+fi
+
+echo "resize-rootfs: root=$ROOT_DEV  disk=$DISK  partition=$PARTNUM"
+
+# Get current and total sizes for reporting
+PART_SIZE_BEFORE=$(lsblk -bno SIZE "$ROOT_DEV" 2>/dev/null || echo "unknown")
+DISK_SIZE=$(lsblk -bno SIZE "$DISK" 2>/dev/null || echo "unknown")
+echo "resize-rootfs: disk=${DISK_SIZE} bytes, partition=${PART_SIZE_BEFORE} bytes (before)"
+
+# Grow partition to fill available space
+# growpart returns 0=changed, 1=no-change (already full), 2+=error
+echo "resize-rootfs: growing partition ..."
+ret=0
+growpart "$DISK" "$PARTNUM" || ret=$?
+if [[ $ret -eq 1 ]]; then
+    echo "resize-rootfs: partition already at maximum size"
+elif [[ $ret -ne 0 ]]; then
+    echo "ERROR: growpart failed (exit $ret)" >&2
+    exit 1
+else
+    echo "resize-rootfs: partition grown successfully"
+fi
+
+# Resize ext4 filesystem (works online on mounted fs)
+echo "resize-rootfs: resizing ext4 filesystem ..."
+resize2fs "$ROOT_DEV"
+
+PART_SIZE_AFTER=$(lsblk -bno SIZE "$ROOT_DEV" 2>/dev/null || echo "unknown")
+echo "resize-rootfs: partition=${PART_SIZE_AFTER} bytes (after)"
+
+# Mark complete
+mkdir -p "$(dirname "$MARKER")"
+touch "$MARKER"
+
+echo "resize-rootfs: done"

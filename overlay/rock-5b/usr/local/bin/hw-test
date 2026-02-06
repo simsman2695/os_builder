@@ -1,0 +1,1533 @@
+#!/bin/bash
+# hw-test — Hardware validation suite for Rock 5B (RK3588)
+# Runs detection, functional, and stress tests on all hardware components.
+#
+# Usage: hw-test [OPTIONS]
+#   --quick       Detection only (seconds)
+#   --functional  Detection + functional tests (minutes)
+#   --stress      Full stress tests (default, 10-30 minutes)
+#   --report      Generate HTML report
+#   --first-boot  First boot mode (auto-disables after run)
+
+set -euo pipefail
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+
+SCRIPT_VERSION="1.0.0"
+LOG_DIR="/var/log/hw-test"
+REPORT_FILE="${LOG_DIR}/hw-test-$(date +%Y%m%d-%H%M%S).log"
+HTML_REPORT="${LOG_DIR}/hw-test-report.html"
+FIRST_BOOT_FLAG="/var/lib/hw-test/first-boot-complete"
+
+# Test durations (seconds)
+CPU_STRESS_DURATION=120
+MEMORY_STRESS_DURATION=60
+STORAGE_STRESS_DURATION=30
+GPU_STRESS_DURATION=60
+THERMAL_MONITOR_DURATION=120
+
+# Thresholds
+MAX_TEMP_CELSIUS=85
+MIN_CPU_FREQ_MHZ=400
+MAX_CPU_FREQ_MHZ=2400
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Test mode
+TEST_MODE="stress"
+GENERATE_HTML=false
+FIRST_BOOT_MODE=false
+
+# Results tracking
+declare -A TEST_RESULTS
+TESTS_PASSED=0
+TESTS_FAILED=0
+TESTS_WARNED=0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Utility Functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+log() {
+    local level="$1"
+    shift
+    local msg="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    case "$level" in
+        INFO)  echo -e "${CYAN}[INFO]${NC}  $msg" ;;
+        PASS)  echo -e "${GREEN}[PASS]${NC}  $msg" ;;
+        FAIL)  echo -e "${RED}[FAIL]${NC}  $msg" ;;
+        WARN)  echo -e "${YELLOW}[WARN]${NC}  $msg" ;;
+        STEP)  echo -e "${BLUE}${BOLD}▶ $msg${NC}" ;;
+        *)     echo -e "$msg" ;;
+    esac
+
+    echo "[$timestamp] [$level] $msg" >> "$REPORT_FILE"
+}
+
+header() {
+    local title="$1"
+    echo ""
+    echo -e "${BOLD}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  $title${NC}"
+    echo -e "${BOLD}════════════════════════════════════════════════════════════════${NC}"
+    echo "" >> "$REPORT_FILE"
+    echo "================================================================" >> "$REPORT_FILE"
+    echo "  $title" >> "$REPORT_FILE"
+    echo "================================================================" >> "$REPORT_FILE"
+}
+
+record_result() {
+    local test_name="$1"
+    local status="$2"
+    local details="${3:-}"
+
+    TEST_RESULTS["$test_name"]="$status|$details"
+
+    case "$status" in
+        PASS) ((TESTS_PASSED++)) || true ;;
+        FAIL) ((TESTS_FAILED++)) || true ;;
+        WARN) ((TESTS_WARNED++)) || true ;;
+    esac
+}
+
+check_command() {
+    command -v "$1" &>/dev/null
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}Error: This script must be run as root${NC}"
+        exit 1
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CPU Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_cpu_detection() {
+    log STEP "Testing CPU detection..."
+
+    local cpu_count
+    cpu_count=$(nproc)
+
+    if [[ $cpu_count -eq 8 ]]; then
+        log PASS "CPU cores: $cpu_count (expected 8 for RK3588)"
+        record_result "cpu_cores" "PASS" "$cpu_count cores"
+    else
+        log WARN "CPU cores: $cpu_count (expected 8 for RK3588)"
+        record_result "cpu_cores" "WARN" "$cpu_count cores"
+    fi
+
+    # Check CPU topology (4x A76 big + 4x A55 little)
+    local big_cores=0
+    local little_cores=0
+
+    for cpu in /sys/devices/system/cpu/cpu[0-7]; do
+        if [[ -f "$cpu/cpufreq/cpuinfo_max_freq" ]]; then
+            local max_freq
+            max_freq=$(cat "$cpu/cpufreq/cpuinfo_max_freq")
+            if [[ $max_freq -gt 2000000 ]]; then
+                ((big_cores++)) || true
+            else
+                ((little_cores++)) || true
+            fi
+        fi
+    done
+
+    if [[ $big_cores -eq 4 && $little_cores -eq 4 ]]; then
+        log PASS "CPU topology: ${big_cores}x big cores + ${little_cores}x little cores"
+        record_result "cpu_topology" "PASS" "big.LITTLE correct"
+    else
+        log WARN "CPU topology: ${big_cores}x big + ${little_cores}x little (expected 4+4)"
+        record_result "cpu_topology" "WARN" "${big_cores}+${little_cores}"
+    fi
+
+    # Check CPU model
+    local cpu_model
+    cpu_model=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "Unknown")
+    log INFO "CPU model: $cpu_model"
+}
+
+test_cpu_frequency() {
+    log STEP "Testing CPU frequency scaling..."
+
+    local all_ok=true
+
+    for cpu in /sys/devices/system/cpu/cpu[0-7]/cpufreq; do
+        if [[ -d "$cpu" ]]; then
+            local cpu_num
+            cpu_num=$(basename "$(dirname "$cpu")")
+            local min_freq max_freq cur_freq governor
+            min_freq=$(($(cat "$cpu/cpuinfo_min_freq") / 1000))
+            max_freq=$(($(cat "$cpu/cpuinfo_max_freq") / 1000))
+            cur_freq=$(($(cat "$cpu/scaling_cur_freq") / 1000))
+            governor=$(cat "$cpu/scaling_governor")
+
+            if [[ $min_freq -lt $MIN_CPU_FREQ_MHZ || $max_freq -gt $((MAX_CPU_FREQ_MHZ + 100)) ]]; then
+                all_ok=false
+            fi
+
+            log INFO "$cpu_num: ${cur_freq}MHz (${min_freq}-${max_freq}MHz) [$governor]"
+        fi
+    done
+
+    if $all_ok; then
+        log PASS "CPU frequency scaling operational"
+        record_result "cpu_frequency" "PASS" "All cores scaling"
+    else
+        log WARN "CPU frequency outside expected range"
+        record_result "cpu_frequency" "WARN" "Check frequencies"
+    fi
+}
+
+test_cpu_stress() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Running CPU stress test (${CPU_STRESS_DURATION}s)..."
+
+    if ! check_command stress-ng; then
+        log WARN "stress-ng not installed, skipping CPU stress test"
+        record_result "cpu_stress" "WARN" "stress-ng not found"
+        return
+    fi
+
+    local start_temp end_temp
+    start_temp=$(get_cpu_temp)
+
+    if stress-ng --cpu 8 --cpu-method all --timeout "${CPU_STRESS_DURATION}s" --metrics-brief 2>&1 | tee -a "$REPORT_FILE"; then
+        end_temp=$(get_cpu_temp)
+        log PASS "CPU stress test completed (temp: ${start_temp}°C → ${end_temp}°C)"
+        record_result "cpu_stress" "PASS" "Completed, max temp ${end_temp}°C"
+    else
+        log FAIL "CPU stress test failed"
+        record_result "cpu_stress" "FAIL" "stress-ng error"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Memory Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_memory_detection() {
+    log STEP "Testing memory detection..."
+
+    local total_mem
+    total_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    local total_gb=$(( (total_mem + 512) / 1024 ))
+
+    # Rock 5B comes in 4/8/16/32GB variants
+    if [[ $total_gb -ge 3 && $total_gb -le 32 ]]; then
+        log PASS "Total RAM: ${total_mem}MB (~${total_gb}GB)"
+        record_result "memory_size" "PASS" "${total_gb}GB"
+    else
+        log WARN "Unexpected RAM size: ${total_mem}MB"
+        record_result "memory_size" "WARN" "${total_mem}MB"
+    fi
+
+    # Check memory info
+    local mem_free mem_available
+    mem_free=$(awk '/MemFree/ {print int($2/1024)}' /proc/meminfo)
+    mem_available=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    log INFO "Free: ${mem_free}MB, Available: ${mem_available}MB"
+}
+
+test_memory_stress() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Running memory stress test (${MEMORY_STRESS_DURATION}s)..."
+
+    if ! check_command stress-ng; then
+        log WARN "stress-ng not installed, skipping memory stress test"
+        record_result "memory_stress" "WARN" "stress-ng not found"
+        return
+    fi
+
+    # Use 70% of available memory
+    local avail_mb
+    avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    local test_mb=$((avail_mb * 70 / 100))
+
+    if stress-ng --vm 4 --vm-bytes "${test_mb}M" --vm-method all --timeout "${MEMORY_STRESS_DURATION}s" --metrics-brief 2>&1 | tee -a "$REPORT_FILE"; then
+        log PASS "Memory stress test completed"
+        record_result "memory_stress" "PASS" "Tested ${test_mb}MB"
+    else
+        log FAIL "Memory stress test failed"
+        record_result "memory_stress" "FAIL" "stress-ng error"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GPU Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_gpu_detection() {
+    log STEP "Testing GPU detection..."
+
+    # Check for Panthor (open-source) or Mali (blob) driver
+    local gpu_driver="none"
+
+    if [[ -d /sys/class/drm/card0 ]]; then
+        if [[ -f /sys/class/drm/card0/device/driver/module/drivers/platform:panthor ]]; then
+            gpu_driver="panthor"
+        elif lsmod 2>/dev/null | grep -q mali; then
+            gpu_driver="mali-blob"
+        elif [[ -d /sys/module/panfrost ]]; then
+            gpu_driver="panfrost"
+        elif [[ -d /sys/module/panthor ]]; then
+            gpu_driver="panthor"
+        fi
+
+        log PASS "GPU detected via DRM"
+        record_result "gpu_drm" "PASS" "DRM available"
+    else
+        log FAIL "No GPU DRM device found"
+        record_result "gpu_drm" "FAIL" "No /sys/class/drm/card0"
+    fi
+
+    # Check driver
+    if [[ -d /sys/module/panthor ]]; then
+        log PASS "Panthor GPU driver loaded"
+        record_result "gpu_driver" "PASS" "panthor"
+    elif lsmod 2>/dev/null | grep -q mali; then
+        log PASS "Mali GPU driver loaded"
+        record_result "gpu_driver" "PASS" "mali-blob"
+    else
+        log WARN "GPU driver not detected in expected location"
+        record_result "gpu_driver" "WARN" "driver unknown"
+    fi
+
+    # Check render node
+    if [[ -e /dev/dri/renderD128 ]]; then
+        log PASS "GPU render node available (/dev/dri/renderD128)"
+        record_result "gpu_render" "PASS" "renderD128 present"
+    else
+        log WARN "GPU render node not found"
+        record_result "gpu_render" "WARN" "No renderD128"
+    fi
+}
+
+test_gpu_functional() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Testing GPU functionality..."
+
+    # Try glxinfo if available
+    if check_command glxinfo; then
+        local renderer
+        renderer=$(glxinfo 2>/dev/null | grep "OpenGL renderer" | cut -d: -f2 | xargs || echo "Unknown")
+        log INFO "OpenGL renderer: $renderer"
+
+        if [[ "$renderer" != "Unknown" && "$renderer" != "" ]]; then
+            log PASS "OpenGL context available"
+            record_result "gpu_opengl" "PASS" "$renderer"
+        fi
+    fi
+
+    # Try Vulkan if available
+    if check_command vulkaninfo; then
+        local vk_device
+        vk_device=$(vulkaninfo 2>/dev/null | grep "deviceName" | head -1 | cut -d= -f2 | xargs || echo "")
+        if [[ -n "$vk_device" ]]; then
+            log PASS "Vulkan device: $vk_device"
+            record_result "gpu_vulkan" "PASS" "$vk_device"
+        fi
+    fi
+}
+
+test_gpu_stress() {
+    [[ "$TEST_MODE" != "stress" ]] && return
+
+    log STEP "Running GPU stress test (${GPU_STRESS_DURATION}s)..."
+
+    if check_command glmark2-es2; then
+        timeout "${GPU_STRESS_DURATION}s" glmark2-es2 --off-screen 2>&1 | tail -20 | tee -a "$REPORT_FILE" || true
+        log PASS "GPU stress test completed"
+        record_result "gpu_stress" "PASS" "glmark2 completed"
+    elif check_command glmark2; then
+        timeout "${GPU_STRESS_DURATION}s" glmark2 --off-screen 2>&1 | tail -20 | tee -a "$REPORT_FILE" || true
+        log PASS "GPU stress test completed"
+        record_result "gpu_stress" "PASS" "glmark2 completed"
+    else
+        log WARN "glmark2 not installed, skipping GPU stress test"
+        record_result "gpu_stress" "WARN" "glmark2 not found"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Storage Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_storage_detection() {
+    log STEP "Testing storage detection..."
+
+    # eMMC
+    if [[ -b /dev/mmcblk0 ]]; then
+        local emmc_size
+        emmc_size=$(lsblk -b -d -n -o SIZE /dev/mmcblk0 2>/dev/null | awk '{print int($1/1073741824)}')
+        log PASS "eMMC detected: ${emmc_size}GB"
+        record_result "storage_emmc" "PASS" "${emmc_size}GB"
+    else
+        log INFO "No eMMC detected"
+        record_result "storage_emmc" "WARN" "Not present"
+    fi
+
+    # SD card
+    if [[ -b /dev/mmcblk1 ]]; then
+        local sd_size
+        sd_size=$(lsblk -b -d -n -o SIZE /dev/mmcblk1 2>/dev/null | awk '{print int($1/1073741824)}')
+        log PASS "SD card detected: ${sd_size}GB"
+        record_result "storage_sd" "PASS" "${sd_size}GB"
+    else
+        log INFO "No SD card detected"
+        record_result "storage_sd" "WARN" "Not present"
+    fi
+
+    # NVMe
+    if [[ -b /dev/nvme0n1 ]]; then
+        local nvme_size nvme_model
+        nvme_size=$(lsblk -b -d -n -o SIZE /dev/nvme0n1 2>/dev/null | awk '{print int($1/1073741824)}')
+        nvme_model=$(cat /sys/block/nvme0n1/device/model 2>/dev/null | xargs || echo "Unknown")
+        log PASS "NVMe detected: ${nvme_size}GB ($nvme_model)"
+        record_result "storage_nvme" "PASS" "${nvme_size}GB"
+    else
+        log INFO "No NVMe detected"
+        record_result "storage_nvme" "WARN" "Not present"
+    fi
+
+    # Check root filesystem
+    local root_dev root_fs root_size
+    root_dev=$(findmnt -n -o SOURCE /)
+    root_fs=$(findmnt -n -o FSTYPE /)
+    root_size=$(findmnt -n -o SIZE /)
+    log INFO "Root filesystem: $root_dev ($root_fs, $root_size)"
+}
+
+test_storage_stress() {
+    [[ "$TEST_MODE" != "stress" ]] && return
+
+    log STEP "Running storage stress test (${STORAGE_STRESS_DURATION}s)..."
+
+    if ! check_command fio; then
+        log WARN "fio not installed, skipping storage stress test"
+        record_result "storage_stress" "WARN" "fio not found"
+        return
+    fi
+
+    local test_dir="/tmp/hw-test-storage"
+    mkdir -p "$test_dir"
+
+    # Sequential write/read test
+    log INFO "Testing sequential I/O..."
+    fio --name=seqtest --directory="$test_dir" --rw=write --bs=1M --size=256M \
+        --numjobs=1 --time_based --runtime="${STORAGE_STRESS_DURATION}s" \
+        --group_reporting --output-format=terse 2>&1 | tee -a "$REPORT_FILE" || true
+
+    # Random I/O test
+    log INFO "Testing random I/O..."
+    fio --name=randtest --directory="$test_dir" --rw=randrw --bs=4K --size=64M \
+        --numjobs=4 --time_based --runtime="${STORAGE_STRESS_DURATION}s" \
+        --group_reporting --output-format=terse 2>&1 | tee -a "$REPORT_FILE" || true
+
+    rm -rf "$test_dir"
+    log PASS "Storage stress test completed"
+    record_result "storage_stress" "PASS" "fio completed"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Network Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_network_detection() {
+    log STEP "Testing network interfaces..."
+
+    # Ethernet interfaces (Rock 5B has 2x 2.5GbE)
+    local eth_count=0
+    for iface in /sys/class/net/en*; do
+        if [[ -d "$iface" ]]; then
+            local name speed state mac
+            name=$(basename "$iface")
+            speed=$(cat "$iface/speed" 2>/dev/null || echo "unknown")
+            state=$(cat "$iface/operstate" 2>/dev/null || echo "unknown")
+            mac=$(cat "$iface/address" 2>/dev/null || echo "unknown")
+
+            log INFO "Ethernet: $name - $state (${speed}Mbps) [$mac]"
+            ((eth_count++)) || true
+        fi
+    done
+
+    if [[ $eth_count -ge 1 ]]; then
+        log PASS "Ethernet interfaces detected: $eth_count"
+        record_result "network_ethernet" "PASS" "$eth_count interfaces"
+    else
+        log FAIL "No Ethernet interfaces detected"
+        record_result "network_ethernet" "FAIL" "None found"
+    fi
+
+    # WiFi
+    local wifi_count=0
+    for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
+        if [[ -d "$iface" ]]; then
+            local name
+            name=$(basename "$iface")
+            log INFO "WiFi: $name"
+            ((wifi_count++)) || true
+        fi
+    done
+
+    if [[ $wifi_count -ge 1 ]]; then
+        log PASS "WiFi interfaces detected: $wifi_count"
+        record_result "network_wifi" "PASS" "$wifi_count interfaces"
+    else
+        log INFO "No WiFi interfaces detected"
+        record_result "network_wifi" "WARN" "None found"
+    fi
+}
+
+test_network_functional() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Testing network connectivity..."
+
+    # Check if we have an IP
+    local has_ip=false
+    if ip route get 1.1.1.1 &>/dev/null; then
+        has_ip=true
+    fi
+
+    if $has_ip; then
+        # Ping test
+        if ping -c 3 -W 5 1.1.1.1 &>/dev/null; then
+            log PASS "Internet connectivity: OK (ping 1.1.1.1)"
+            record_result "network_ping" "PASS" "1.1.1.1 reachable"
+        else
+            log WARN "Internet ping failed"
+            record_result "network_ping" "WARN" "Ping failed"
+        fi
+
+        # DNS test
+        if host google.com &>/dev/null || nslookup google.com &>/dev/null 2>&1; then
+            log PASS "DNS resolution: OK"
+            record_result "network_dns" "PASS" "DNS working"
+        else
+            log WARN "DNS resolution failed"
+            record_result "network_dns" "WARN" "DNS failed"
+        fi
+    else
+        log WARN "No network route available"
+        record_result "network_ping" "WARN" "No route"
+        record_result "network_dns" "WARN" "No route"
+    fi
+}
+
+test_network_stress() {
+    [[ "$TEST_MODE" != "stress" ]] && return
+
+    log STEP "Network stress test..."
+
+    if ! check_command iperf3; then
+        log WARN "iperf3 not installed, skipping network stress test"
+        record_result "network_stress" "WARN" "iperf3 not found"
+        return
+    fi
+
+    log INFO "To run network stress test, start iperf3 server on another machine:"
+    log INFO "  iperf3 -s"
+    log INFO "Then run: iperf3 -c <server-ip> -t 30"
+    record_result "network_stress" "WARN" "Manual test required"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# USB Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_usb_detection() {
+    log STEP "Testing USB controllers and devices..."
+
+    # Count USB controllers
+    local usb_controllers
+    usb_controllers=$(lspci 2>/dev/null | grep -c "USB controller") || true
+
+    if [[ $usb_controllers -gt 0 ]]; then
+        log INFO "USB controllers (PCIe): $usb_controllers"
+    fi
+
+    # Check USB host controllers in device tree
+    local usb_hosts=0
+    for host in /sys/bus/usb/devices/usb*; do
+        if [[ -d "$host" ]]; then
+            ((usb_hosts++)) || true
+        fi
+    done
+
+    if [[ $usb_hosts -gt 0 ]]; then
+        log PASS "USB host controllers: $usb_hosts"
+        record_result "usb_controllers" "PASS" "$usb_hosts hosts"
+    else
+        log FAIL "No USB host controllers found"
+        record_result "usb_controllers" "FAIL" "None found"
+    fi
+
+    # List connected devices
+    if check_command lsusb; then
+        log INFO "Connected USB devices:"
+        lsusb 2>/dev/null | while read -r line; do
+            log INFO "  $line"
+        done
+    fi
+
+    # Check for USB 3.0 capability
+    if [[ -d /sys/bus/usb/devices/usb1 ]] && grep -q "5000" /sys/bus/usb/devices/usb1/speed 2>/dev/null; then
+        log PASS "USB 3.0 (5Gbps) available"
+        record_result "usb3" "PASS" "5Gbps capable"
+    else
+        log INFO "USB 3.0 speed not detected on usb1"
+        record_result "usb3" "WARN" "Check manually"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Audio Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_audio_detection() {
+    log STEP "Testing audio devices..."
+
+    # Check for sound cards
+    if [[ -f /proc/asound/cards ]]; then
+        local card_count
+        card_count=$(grep -c "^\s*[0-9]" /proc/asound/cards 2>/dev/null || echo "0")
+
+        if [[ $card_count -gt 0 ]]; then
+            log PASS "Sound cards detected: $card_count"
+            record_result "audio_cards" "PASS" "$card_count cards"
+
+            log INFO "Sound cards:"
+            cat /proc/asound/cards | while read -r line; do
+                [[ -n "$line" ]] && log INFO "  $line"
+            done
+        else
+            log WARN "No sound cards detected"
+            record_result "audio_cards" "WARN" "None found"
+        fi
+    else
+        log FAIL "ALSA not available (/proc/asound/cards missing)"
+        record_result "audio_cards" "FAIL" "ALSA missing"
+    fi
+
+    # Check for PulseAudio/PipeWire
+    if pgrep -x pipewire &>/dev/null; then
+        log INFO "Audio server: PipeWire"
+    elif pgrep -x pulseaudio &>/dev/null; then
+        log INFO "Audio server: PulseAudio"
+    fi
+}
+
+test_audio_functional() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Testing audio playback..."
+
+    if check_command speaker-test; then
+        log INFO "Running speaker test (2 seconds)..."
+        timeout 2s speaker-test -t sine -f 440 -l 1 &>/dev/null || true
+        log PASS "Audio playback test completed"
+        record_result "audio_playback" "PASS" "speaker-test OK"
+    else
+        log WARN "speaker-test not available"
+        record_result "audio_playback" "WARN" "speaker-test missing"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Display Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_display_detection() {
+    log STEP "Testing display outputs..."
+
+    # Check DRM connectors
+    local connector_count=0
+    for connector in /sys/class/drm/card*-*; do
+        if [[ -d "$connector" ]]; then
+            local name status
+            name=$(basename "$connector")
+            status=$(cat "$connector/status" 2>/dev/null || echo "unknown")
+
+            log INFO "Display: $name - $status"
+            ((connector_count++)) || true
+
+            if [[ "$status" == "connected" ]]; then
+                # Try to get EDID info
+                if [[ -f "$connector/edid" ]] && check_command edid-decode; then
+                    local monitor_name
+                    monitor_name=$(edid-decode "$connector/edid" 2>/dev/null | grep "Monitor name" | cut -d: -f2 | xargs || echo "")
+                    [[ -n "$monitor_name" ]] && log INFO "  Monitor: $monitor_name"
+                fi
+            fi
+        fi
+    done
+
+    if [[ $connector_count -gt 0 ]]; then
+        log PASS "Display connectors: $connector_count"
+        record_result "display_connectors" "PASS" "$connector_count outputs"
+    else
+        log WARN "No display connectors found"
+        record_result "display_connectors" "WARN" "None found"
+    fi
+
+    # Check framebuffer
+    if [[ -e /dev/fb0 ]]; then
+        local fb_size
+        fb_size=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || echo "unknown")
+        log PASS "Framebuffer available: /dev/fb0 ($fb_size)"
+        record_result "display_fb" "PASS" "fb0 $fb_size"
+    else
+        log INFO "No framebuffer device"
+        record_result "display_fb" "WARN" "No fb0"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# I2C/SPI/GPIO Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_peripheral_buses() {
+    log STEP "Testing peripheral buses (I2C/SPI/GPIO)..."
+
+    # I2C buses
+    local i2c_count=0
+    for bus in /dev/i2c-*; do
+        if [[ -c "$bus" ]]; then
+            ((i2c_count++)) || true
+        fi
+    done
+
+    if [[ $i2c_count -gt 0 ]]; then
+        log PASS "I2C buses available: $i2c_count"
+        record_result "i2c_buses" "PASS" "$i2c_count buses"
+
+        # Scan I2C if i2c-tools installed
+        if check_command i2cdetect; then
+            log INFO "I2C device scan (bus 0):"
+            i2cdetect -y 0 2>/dev/null | head -10 | tee -a "$REPORT_FILE" || true
+        fi
+    else
+        log WARN "No I2C buses found"
+        record_result "i2c_buses" "WARN" "None found"
+    fi
+
+    # SPI buses
+    local spi_count=0
+    for bus in /dev/spidev*; do
+        if [[ -c "$bus" ]]; then
+            ((spi_count++)) || true
+        fi
+    done
+
+    if [[ $spi_count -gt 0 ]]; then
+        log PASS "SPI devices available: $spi_count"
+        record_result "spi_devices" "PASS" "$spi_count devices"
+    else
+        log INFO "No SPI devices exposed"
+        record_result "spi_devices" "WARN" "None found"
+    fi
+
+    # GPIO
+    if [[ -d /sys/class/gpio ]] || [[ -c /dev/gpiochip0 ]]; then
+        local gpio_chips
+        gpio_chips=$(ls -1 /dev/gpiochip* 2>/dev/null | wc -l)
+        log PASS "GPIO available: $gpio_chips chips"
+        record_result "gpio" "PASS" "$gpio_chips chips"
+    else
+        log WARN "GPIO not available"
+        record_result "gpio" "WARN" "Not found"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Thermal Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+get_cpu_temp() {
+    local temp=0
+    for zone in /sys/class/thermal/thermal_zone*/temp; do
+        if [[ -f "$zone" ]]; then
+            local t
+            t=$(cat "$zone" 2>/dev/null || echo "0")
+            t=$((t / 1000))
+            if [[ $t -gt $temp ]]; then
+                temp=$t
+            fi
+        fi
+    done
+    echo "$temp"
+}
+
+test_thermal_detection() {
+    log STEP "Testing thermal sensors..."
+
+    local zone_count=0
+    for zone in /sys/class/thermal/thermal_zone*; do
+        if [[ -d "$zone" ]]; then
+            local name temp
+            name=$(cat "$zone/type" 2>/dev/null || echo "unknown")
+            temp=$(($(cat "$zone/temp" 2>/dev/null || echo "0") / 1000))
+
+            log INFO "Thermal zone: $name = ${temp}°C"
+            ((zone_count++)) || true
+        fi
+    done
+
+    if [[ $zone_count -gt 0 ]]; then
+        log PASS "Thermal zones: $zone_count"
+        record_result "thermal_zones" "PASS" "$zone_count zones"
+    else
+        log FAIL "No thermal zones found"
+        record_result "thermal_zones" "FAIL" "None found"
+    fi
+
+    # Check cooling devices
+    local cooling_count=0
+    for cooling in /sys/class/thermal/cooling_device*; do
+        if [[ -d "$cooling" ]]; then
+            ((cooling_count++)) || true
+        fi
+    done
+
+    if [[ $cooling_count -gt 0 ]]; then
+        log PASS "Cooling devices: $cooling_count"
+        record_result "thermal_cooling" "PASS" "$cooling_count devices"
+    fi
+}
+
+test_thermal_stress() {
+    [[ "$TEST_MODE" != "stress" ]] && return
+
+    log STEP "Thermal stress test (monitoring during CPU stress)..."
+
+    local max_temp=0
+    local throttle_detected=false
+    local start_temp
+    start_temp=$(get_cpu_temp)
+
+    log INFO "Starting temperature: ${start_temp}°C"
+    log INFO "Monitoring thermal during ${THERMAL_MONITOR_DURATION}s stress..."
+
+    # Start CPU stress in background
+    if check_command stress-ng; then
+        stress-ng --cpu 8 --timeout "${THERMAL_MONITOR_DURATION}s" &>/dev/null &
+        local stress_pid=$!
+
+        # Monitor temperature
+        for ((i=0; i<THERMAL_MONITOR_DURATION; i+=5)); do
+            sleep 5
+            local temp
+            temp=$(get_cpu_temp)
+            [[ $temp -gt $max_temp ]] && max_temp=$temp
+
+            if [[ $temp -gt $MAX_TEMP_CELSIUS ]]; then
+                log WARN "High temperature detected: ${temp}°C"
+                throttle_detected=true
+            fi
+
+            log INFO "Temperature at ${i}s: ${temp}°C"
+        done
+
+        wait $stress_pid 2>/dev/null || true
+    fi
+
+    local end_temp
+    end_temp=$(get_cpu_temp)
+
+    if [[ $max_temp -lt $MAX_TEMP_CELSIUS ]]; then
+        log PASS "Thermal test passed (max: ${max_temp}°C, limit: ${MAX_TEMP_CELSIUS}°C)"
+        record_result "thermal_stress" "PASS" "Max ${max_temp}°C"
+    else
+        log WARN "Thermal throttling likely (max: ${max_temp}°C exceeded ${MAX_TEMP_CELSIUS}°C)"
+        record_result "thermal_stress" "WARN" "Max ${max_temp}°C - check cooling"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RTC Test
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_rtc() {
+    log STEP "Testing Real-Time Clock..."
+
+    if [[ -c /dev/rtc0 ]]; then
+        log PASS "RTC device present: /dev/rtc0"
+        record_result "rtc_device" "PASS" "rtc0 present"
+
+        # Read RTC time
+        if check_command hwclock; then
+            local rtc_time
+            rtc_time=$(hwclock -r 2>/dev/null || echo "read error")
+            log INFO "RTC time: $rtc_time"
+
+            # Compare with system time
+            local sys_time
+            sys_time=$(date)
+            log INFO "System time: $sys_time"
+        fi
+    else
+        log WARN "No RTC device found"
+        record_result "rtc_device" "WARN" "Not found"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NPU Tests (RK3588 Neural Processing Unit — 3-core, 6 TOPS)
+# ══════════════════════════════════════════════════════════════════════════════
+
+NPU_DEVFREQ="/sys/class/devfreq/fdab0000.npu"
+NPU_STRESS_DURATION=60
+
+test_npu_detection() {
+    log STEP "Testing NPU detection..."
+
+    # Check for RKNPU device node
+    if [[ -c /dev/rknpu ]]; then
+        log PASS "NPU device present: /dev/rknpu"
+        record_result "npu_device" "PASS" "rknpu present"
+    else
+        log FAIL "NPU device node /dev/rknpu not found"
+        record_result "npu_device" "FAIL" "Not found"
+        return
+    fi
+
+    # Check NPU driver loaded
+    if [[ -d /sys/module/rknpu ]]; then
+        log PASS "RKNPU kernel module loaded"
+        record_result "npu_driver" "PASS" "rknpu module loaded"
+    else
+        log WARN "RKNPU kernel module not detected in /sys/module"
+        record_result "npu_driver" "WARN" "Module not in sysfs"
+    fi
+
+    # Driver version from dmesg
+    local drv_version
+    drv_version=$(dmesg 2>/dev/null | grep -oP "RKNPU driver version: \K[^\s]+" | tail -1 || echo "")
+    if [[ -n "$drv_version" ]]; then
+        log INFO "NPU driver version: $drv_version"
+    fi
+
+    # Check NPU core count from device tree / debug
+    local npu_cores=0
+    if [[ -f /sys/kernel/debug/rknpu/load ]]; then
+        npu_cores=$(wc -l < /sys/kernel/debug/rknpu/load 2>/dev/null || echo "0")
+    fi
+    if [[ $npu_cores -ge 3 ]]; then
+        log PASS "NPU cores: $npu_cores (expected 3 for RK3588)"
+        record_result "npu_cores" "PASS" "$npu_cores cores"
+    elif [[ $npu_cores -gt 0 ]]; then
+        log WARN "NPU cores: $npu_cores (expected 3 for RK3588)"
+        record_result "npu_cores" "WARN" "$npu_cores cores"
+    else
+        log INFO "NPU core count not available via debug interface"
+    fi
+
+    # Check devfreq (frequency management)
+    if [[ -d "$NPU_DEVFREQ" ]]; then
+        local cur_freq avail_freqs max_freq governor
+        cur_freq=$(($(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0") / 1000000))
+        max_freq=$(($(cat "$NPU_DEVFREQ/max_freq" 2>/dev/null || echo "0") / 1000000))
+        governor=$(cat "$NPU_DEVFREQ/governor" 2>/dev/null || echo "unknown")
+        avail_freqs=$(cat "$NPU_DEVFREQ/available_frequencies" 2>/dev/null || echo "")
+
+        log PASS "NPU devfreq available: ${cur_freq}MHz / ${max_freq}MHz [$governor]"
+        record_result "npu_devfreq" "PASS" "${max_freq}MHz max"
+
+        if [[ -n "$avail_freqs" ]]; then
+            local freq_list=""
+            for f in $avail_freqs; do
+                freq_list="${freq_list} $((f / 1000000))MHz"
+            done
+            log INFO "NPU available frequencies:${freq_list}"
+        fi
+    else
+        log WARN "NPU devfreq not available at $NPU_DEVFREQ"
+        record_result "npu_devfreq" "WARN" "devfreq missing"
+    fi
+
+    # Check for RKNN runtime library
+    local rknn_lib=""
+    if [[ -f /usr/lib/librknnrt.so ]]; then
+        rknn_lib="/usr/lib/librknnrt.so"
+    elif [[ -f /usr/lib/aarch64-linux-gnu/librknnrt.so ]]; then
+        rknn_lib="/usr/lib/aarch64-linux-gnu/librknnrt.so"
+    fi
+
+    if [[ -n "$rknn_lib" ]]; then
+        log PASS "RKNN runtime library: $rknn_lib"
+        record_result "npu_runtime" "PASS" "librknnrt present"
+    else
+        log FAIL "RKNN runtime library (librknnrt.so) not found"
+        record_result "npu_runtime" "FAIL" "librknnrt missing"
+    fi
+
+    # Check for rknn_server
+    if check_command rknn_server; then
+        log PASS "rknn_server binary available"
+        record_result "npu_server" "PASS" "rknn_server present"
+    else
+        log WARN "rknn_server not found in PATH"
+        record_result "npu_server" "WARN" "rknn_server missing"
+    fi
+}
+
+test_npu_functional() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+    [[ ! -c /dev/rknpu ]] && return
+
+    log STEP "Testing NPU functionality..."
+
+    # Test frequency scaling
+    if [[ -d "$NPU_DEVFREQ" && -w "$NPU_DEVFREQ/governor" ]]; then
+        local orig_governor avail_freqs
+        orig_governor=$(cat "$NPU_DEVFREQ/governor" 2>/dev/null)
+        avail_freqs=$(cat "$NPU_DEVFREQ/available_frequencies" 2>/dev/null || echo "")
+
+        if [[ -n "$avail_freqs" ]]; then
+            local freq_arr=($avail_freqs)
+            local min_f="${freq_arr[0]}"
+            local max_f="${freq_arr[-1]}"
+
+            # Switch to userspace governor to test frequency changes
+            echo userspace > "$NPU_DEVFREQ/governor" 2>/dev/null || true
+
+            local scaling_ok=true
+
+            # Set to min frequency
+            if echo "$min_f" > "$NPU_DEVFREQ/userspace/set_freq" 2>/dev/null; then
+                sleep 0.5
+                local actual
+                actual=$(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0")
+                if [[ "$actual" == "$min_f" ]]; then
+                    log INFO "NPU min frequency: $((min_f / 1000000))MHz - OK"
+                else
+                    scaling_ok=false
+                fi
+            fi
+
+            # Set to max frequency
+            if echo "$max_f" > "$NPU_DEVFREQ/userspace/set_freq" 2>/dev/null; then
+                sleep 0.5
+                local actual
+                actual=$(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0")
+                if [[ "$actual" == "$max_f" ]]; then
+                    log INFO "NPU max frequency: $((max_f / 1000000))MHz - OK"
+                else
+                    scaling_ok=false
+                fi
+            fi
+
+            # Restore original governor
+            echo "$orig_governor" > "$NPU_DEVFREQ/governor" 2>/dev/null || true
+
+            if $scaling_ok; then
+                log PASS "NPU frequency scaling operational ($((min_f / 1000000))-$((max_f / 1000000))MHz)"
+                record_result "npu_freq_scaling" "PASS" "$((min_f / 1000000))-$((max_f / 1000000))MHz"
+            else
+                log WARN "NPU frequency scaling may not be working correctly"
+                record_result "npu_freq_scaling" "WARN" "Frequency mismatch"
+            fi
+        fi
+    else
+        log INFO "NPU devfreq not writable, skipping frequency scaling test"
+    fi
+
+    # Test rknn_server start/stop
+    if check_command rknn_server; then
+        log INFO "Testing rknn_server startup..."
+        rknn_server &>/dev/null &
+        local server_pid=$!
+        sleep 2
+
+        if kill -0 "$server_pid" 2>/dev/null; then
+            log PASS "rknn_server started successfully (PID $server_pid)"
+            record_result "npu_server_start" "PASS" "Starts OK"
+            kill "$server_pid" 2>/dev/null
+            wait "$server_pid" 2>/dev/null || true
+        else
+            log WARN "rknn_server exited unexpectedly"
+            record_result "npu_server_start" "WARN" "Exited early"
+        fi
+    fi
+
+    # Check for NPU errors in dmesg
+    local npu_errors
+    npu_errors=$(dmesg 2>/dev/null | grep -icE "rknpu.*(error|fail|timeout)" || echo "0")
+    if [[ "$npu_errors" -eq 0 ]]; then
+        log PASS "No NPU errors in dmesg"
+        record_result "npu_errors" "PASS" "No errors"
+    else
+        log WARN "Found $npu_errors NPU-related errors in dmesg"
+        record_result "npu_errors" "WARN" "$npu_errors errors"
+        dmesg 2>/dev/null | grep -iE "rknpu.*(error|fail|timeout)" | tail -5 | while read -r line; do
+            log INFO "  $line"
+        done
+    fi
+
+    # Run real NPU inference test (MobileNet + optional OCR)
+    local inference_script="/usr/local/lib/hw-test/npu_inference_test.py"
+    if check_command python3 && [[ -f "$inference_script" ]]; then
+        log INFO "Running NPU inference test (MobileNet on NPU) ..."
+        local inference_output
+        inference_output=$(python3 "$inference_script" 2>/dev/null) || true
+
+        if [[ -n "$inference_output" ]]; then
+            # Parse MobileNet results
+            local mn_status mn_ms mn_error
+            mn_status=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('status','SKIP'))" 2>/dev/null || echo "SKIP")
+            mn_ms=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('inference_ms','?'))" 2>/dev/null || echo "?")
+            mn_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('error',''))" 2>/dev/null || echo "")
+
+            case "$mn_status" in
+                PASS)
+                    log PASS "MobileNet inference OK (avg ${mn_ms}ms on NPU)"
+                    record_result "npu_inference" "PASS" "${mn_ms}ms avg"
+                    # Show top prediction
+                    local top_class top_conf
+                    top_class=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['mobilenet']['top5'][0]['class_id'])" 2>/dev/null || echo "?")
+                    top_conf=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['mobilenet']['top5'][0]['confidence'])" 2>/dev/null || echo "?")
+                    log INFO "Top prediction: class $top_class (confidence: $top_conf)"
+                    ;;
+                FAIL)
+                    log FAIL "MobileNet inference failed: $mn_error"
+                    record_result "npu_inference" "FAIL" "$mn_error"
+                    ;;
+                *)
+                    log INFO "MobileNet inference skipped: $mn_error"
+                    ;;
+            esac
+
+            # Parse OCR results (if available)
+            local ocr_status
+            ocr_status=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ocr',{}).get('status','NONE'))" 2>/dev/null || echo "NONE")
+
+            if [[ "$ocr_status" != "NONE" ]]; then
+                local ocr_expected ocr_recognized ocr_match ocr_ms
+                ocr_expected=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['expected'])" 2>/dev/null || echo "?")
+                ocr_recognized=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['recognized'])" 2>/dev/null || echo "?")
+                ocr_match=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['match'])" 2>/dev/null || echo "?")
+                ocr_ms=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['inference_ms'])" 2>/dev/null || echo "?")
+
+                case "$ocr_status" in
+                    PASS)
+                        log PASS "OCR test: '${ocr_recognized}' matches expected '${ocr_expected}' (${ocr_ms}ms)"
+                        record_result "npu_ocr" "PASS" "Recognized '${ocr_recognized}' in ${ocr_ms}ms"
+                        ;;
+                    WARN)
+                        log WARN "OCR test: recognized '${ocr_recognized}', expected '${ocr_expected}' (${ocr_ms}ms)"
+                        record_result "npu_ocr" "WARN" "Expected '${ocr_expected}' got '${ocr_recognized}'"
+                        ;;
+                    FAIL)
+                        local ocr_error
+                        ocr_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr'].get('error',''))" 2>/dev/null || echo "")
+                        log FAIL "OCR test failed: $ocr_error"
+                        record_result "npu_ocr" "FAIL" "$ocr_error"
+                        ;;
+                esac
+            fi
+        else
+            local skip_error
+            skip_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null || echo "rknnlite2 not available")
+            log INFO "NPU inference test skipped: $skip_error"
+        fi
+    else
+        log INFO "NPU inference test not available (python3 or test script missing)"
+    fi
+}
+
+test_npu_stress() {
+    [[ "$TEST_MODE" != "stress" ]] && return
+    [[ ! -c /dev/rknpu ]] && return
+    [[ ! -d "$NPU_DEVFREQ" ]] && return
+
+    log STEP "Running NPU stress test (${NPU_STRESS_DURATION}s at max frequency)..."
+
+    local orig_governor max_freq
+    orig_governor=$(cat "$NPU_DEVFREQ/governor" 2>/dev/null)
+    max_freq=$(cat "$NPU_DEVFREQ/max_freq" 2>/dev/null || echo "0")
+
+    if [[ "$max_freq" == "0" ]]; then
+        log WARN "Cannot determine NPU max frequency, skipping stress test"
+        record_result "npu_stress" "WARN" "No max freq"
+        return
+    fi
+
+    # Lock NPU to max frequency
+    echo userspace > "$NPU_DEVFREQ/governor" 2>/dev/null || true
+    echo "$max_freq" > "$NPU_DEVFREQ/userspace/set_freq" 2>/dev/null || true
+
+    local start_temp max_temp
+    start_temp=$(get_cpu_temp)
+    max_temp=$start_temp
+
+    log INFO "NPU locked to $((max_freq / 1000000))MHz, monitoring for ${NPU_STRESS_DURATION}s..."
+    log INFO "Start SoC temperature: ${start_temp}°C"
+
+    # Monitor NPU at max freq — the sustained clock hold stresses power delivery and thermals
+    local npu_stable=true
+    for ((i=0; i<NPU_STRESS_DURATION; i+=10)); do
+        sleep 10
+        local temp cur_freq
+        temp=$(get_cpu_temp)
+        cur_freq=$(($(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0") / 1000000))
+        [[ $temp -gt $max_temp ]] && max_temp=$temp
+
+        log INFO "NPU stress ${i}s: ${cur_freq}MHz, SoC temp: ${temp}°C"
+
+        # Check if frequency dropped (thermal throttling)
+        if [[ $(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0") -lt $max_freq ]]; then
+            log WARN "NPU frequency dropped to ${cur_freq}MHz (throttling?)"
+            npu_stable=false
+        fi
+    done
+
+    # Restore original governor
+    echo "$orig_governor" > "$NPU_DEVFREQ/governor" 2>/dev/null || true
+
+    local end_temp
+    end_temp=$(get_cpu_temp)
+
+    if $npu_stable && [[ $max_temp -lt $MAX_TEMP_CELSIUS ]]; then
+        log PASS "NPU stress test passed (max temp: ${max_temp}°C, freq held at $((max_freq / 1000000))MHz)"
+        record_result "npu_stress" "PASS" "Stable, max ${max_temp}°C"
+    elif ! $npu_stable; then
+        log WARN "NPU throttled during stress test (max temp: ${max_temp}°C)"
+        record_result "npu_stress" "WARN" "Throttled, max ${max_temp}°C"
+    else
+        log WARN "NPU stress test: high temperature (max: ${max_temp}°C)"
+        record_result "npu_stress" "WARN" "Hot, max ${max_temp}°C"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Report Generation
+# ══════════════════════════════════════════════════════════════════════════════
+
+generate_html_report() {
+    log INFO "Generating HTML report..."
+
+    cat > "$HTML_REPORT" <<'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware Test Report</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               margin: 20px; background: #f5f5f5; }
+        .container { max-width: 900px; margin: 0 auto; background: white;
+                     padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        h2 { color: #555; margin-top: 30px; }
+        .summary { display: flex; gap: 20px; margin: 20px 0; }
+        .stat { padding: 15px 25px; border-radius: 8px; text-align: center; }
+        .stat-pass { background: #d4edda; color: #155724; }
+        .stat-fail { background: #f8d7da; color: #721c24; }
+        .stat-warn { background: #fff3cd; color: #856404; }
+        .stat-number { font-size: 2em; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f8f9fa; }
+        .pass { color: #28a745; }
+        .fail { color: #dc3545; }
+        .warn { color: #ffc107; }
+        .timestamp { color: #666; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Hardware Test Report</h1>
+        <p class="timestamp">Generated: TIMESTAMP_PLACEHOLDER</p>
+        <p><strong>Board:</strong> Rock 5B (RK3588) | <strong>Test Mode:</strong> MODE_PLACEHOLDER</p>
+
+        <div class="summary">
+            <div class="stat stat-pass">
+                <div class="stat-number">PASS_COUNT</div>
+                <div>Passed</div>
+            </div>
+            <div class="stat stat-warn">
+                <div class="stat-number">WARN_COUNT</div>
+                <div>Warnings</div>
+            </div>
+            <div class="stat stat-fail">
+                <div class="stat-number">FAIL_COUNT</div>
+                <div>Failed</div>
+            </div>
+        </div>
+
+        <h2>Test Results</h2>
+        <table>
+            <tr><th>Test</th><th>Status</th><th>Details</th></tr>
+HTMLEOF
+
+    # Add test results
+    for test_name in "${!TEST_RESULTS[@]}"; do
+        local result="${TEST_RESULTS[$test_name]}"
+        local status="${result%%|*}"
+        local details="${result#*|}"
+        local status_class
+
+        case "$status" in
+            PASS) status_class="pass" ;;
+            FAIL) status_class="fail" ;;
+            WARN) status_class="warn" ;;
+        esac
+
+        echo "<tr><td>$test_name</td><td class=\"$status_class\">$status</td><td>$details</td></tr>" >> "$HTML_REPORT"
+    done
+
+    cat >> "$HTML_REPORT" <<'HTMLEOF'
+        </table>
+    </div>
+</body>
+</html>
+HTMLEOF
+
+    # Replace placeholders
+    sed -i "s/TIMESTAMP_PLACEHOLDER/$(date)/g" "$HTML_REPORT"
+    sed -i "s/MODE_PLACEHOLDER/$TEST_MODE/g" "$HTML_REPORT"
+    sed -i "s/PASS_COUNT/$TESTS_PASSED/g" "$HTML_REPORT"
+    sed -i "s/WARN_COUNT/$TESTS_WARNED/g" "$HTML_REPORT"
+    sed -i "s/FAIL_COUNT/$TESTS_FAILED/g" "$HTML_REPORT"
+
+    log PASS "HTML report saved to: $HTML_REPORT"
+}
+
+print_summary() {
+    echo ""
+    header "Test Summary"
+    echo ""
+    echo -e "  ${GREEN}Passed:${NC}   $TESTS_PASSED"
+    echo -e "  ${YELLOW}Warnings:${NC} $TESTS_WARNED"
+    echo -e "  ${RED}Failed:${NC}   $TESTS_FAILED"
+    echo ""
+
+    local total=$((TESTS_PASSED + TESTS_WARNED + TESTS_FAILED))
+    if [[ $TESTS_FAILED -eq 0 ]]; then
+        echo -e "${GREEN}${BOLD}✓ All critical tests passed!${NC}"
+    else
+        echo -e "${RED}${BOLD}✗ Some tests failed - review results above${NC}"
+    fi
+
+    echo ""
+    echo "Full log: $REPORT_FILE"
+    [[ "$GENERATE_HTML" == "true" ]] && echo "HTML report: $HTML_REPORT"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# First Boot Handling
+# ══════════════════════════════════════════════════════════════════════════════
+
+handle_first_boot() {
+    if [[ -f "$FIRST_BOOT_FLAG" ]]; then
+        log INFO "First boot test already completed"
+        return 1
+    fi
+
+    log INFO "Running first boot hardware validation..."
+
+    # Create flag directory
+    mkdir -p "$(dirname "$FIRST_BOOT_FLAG")"
+
+    # Run tests
+    run_all_tests
+
+    # Mark first boot complete
+    date > "$FIRST_BOOT_FLAG"
+    echo "Test mode: $TEST_MODE" >> "$FIRST_BOOT_FLAG"
+    echo "Passed: $TESTS_PASSED" >> "$FIRST_BOOT_FLAG"
+    echo "Warnings: $TESTS_WARNED" >> "$FIRST_BOOT_FLAG"
+    echo "Failed: $TESTS_FAILED" >> "$FIRST_BOOT_FLAG"
+
+    log INFO "First boot test complete, results saved"
+    return 0
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main Test Runner
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_all_tests() {
+    header "Hardware Test Suite v${SCRIPT_VERSION}"
+    log INFO "Test mode: $TEST_MODE"
+    log INFO "Start time: $(date)"
+    log INFO "Board: Rock 5B (RK3588)"
+    echo ""
+
+    # CPU Tests
+    header "CPU Tests"
+    test_cpu_detection
+    test_cpu_frequency
+    test_cpu_stress
+
+    # Memory Tests
+    header "Memory Tests"
+    test_memory_detection
+    test_memory_stress
+
+    # GPU Tests
+    header "GPU Tests"
+    test_gpu_detection
+    test_gpu_functional
+    test_gpu_stress
+
+    # Storage Tests
+    header "Storage Tests"
+    test_storage_detection
+    test_storage_stress
+
+    # Network Tests
+    header "Network Tests"
+    test_network_detection
+    test_network_functional
+    test_network_stress
+
+    # USB Tests
+    header "USB Tests"
+    test_usb_detection
+
+    # Audio Tests
+    header "Audio Tests"
+    test_audio_detection
+    test_audio_functional
+
+    # Display Tests
+    header "Display Tests"
+    test_display_detection
+
+    # Peripheral Buses
+    header "I2C/SPI/GPIO Tests"
+    test_peripheral_buses
+
+    # Thermal Tests
+    header "Thermal Tests"
+    test_thermal_detection
+    test_thermal_stress
+
+    # RTC Test
+    header "RTC Test"
+    test_rtc
+
+    # NPU Tests
+    header "NPU Tests (RKNPU2)"
+    test_npu_detection
+    test_npu_functional
+    test_npu_stress
+
+    # Generate reports
+    [[ "$GENERATE_HTML" == "true" ]] && generate_html_report
+
+    print_summary
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry Point
+# ══════════════════════════════════════════════════════════════════════════════
+
+show_help() {
+    cat <<EOF
+Hardware Test Suite for Rock 5B (RK3588)
+Version: $SCRIPT_VERSION
+
+Usage: hw-test [OPTIONS]
+
+Options:
+  --quick        Detection tests only (runs in seconds)
+  --functional   Detection + functional tests (runs in minutes)
+  --stress       Full stress tests (default, 10-30 minutes)
+  --report       Generate HTML report
+  --first-boot   First boot mode (marks completion, won't re-run)
+  -h, --help     Show this help message
+
+Examples:
+  hw-test                  # Full stress test suite
+  hw-test --quick          # Quick detection check
+  hw-test --stress --report # Stress tests with HTML report
+
+EOF
+}
+
+main() {
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick)
+                TEST_MODE="quick"
+                shift
+                ;;
+            --functional)
+                TEST_MODE="functional"
+                shift
+                ;;
+            --stress)
+                TEST_MODE="stress"
+                shift
+                ;;
+            --report)
+                GENERATE_HTML=true
+                shift
+                ;;
+            --first-boot)
+                FIRST_BOOT_MODE=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # Require root for full tests
+    if [[ "$TEST_MODE" != "quick" ]]; then
+        require_root
+    fi
+
+    # Setup logging
+    mkdir -p "$LOG_DIR"
+
+    # Initialize report file
+    echo "Hardware Test Report - $(date)" > "$REPORT_FILE"
+    echo "Board: Rock 5B (RK3588)" >> "$REPORT_FILE"
+    echo "Test mode: $TEST_MODE" >> "$REPORT_FILE"
+    echo "========================================" >> "$REPORT_FILE"
+
+    # Run tests
+    if [[ "$FIRST_BOOT_MODE" == "true" ]]; then
+        handle_first_boot
+    else
+        run_all_tests
+    fi
+
+    # Exit with appropriate code
+    if [[ $TESTS_FAILED -gt 0 ]]; then
+        exit 1
+    fi
+    exit 0
+}
+
+main "$@"

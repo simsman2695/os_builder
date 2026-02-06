@@ -1,0 +1,14 @@
+[Unit]
+Description=Hardware Validation Test (First Boot)
+After=multi-user.target
+ConditionPathExists=!/var/lib/hw-test/first-boot-complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hw-test --first-boot --report
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

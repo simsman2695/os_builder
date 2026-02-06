@@ -74,14 +74,44 @@ log_info "Installing packages inside chroot ..."
 chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+apt-get dist-upgrade -y --no-install-recommends
 apt-get install -y --no-install-recommends \
-    systemd systemd-sysv udev kmod \
+    systemd systemd-sysv udev kmod dbus \
+    systemd-timesyncd \
     iproute2 iputils-ping net-tools \
     openssh-server sudo \
     netplan.io \
     wpasupplicant \
+    cloud-guest-utils e2fsprogs \
     locales \
     vim-tiny less wget
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+CHROOTEOF
+
+# ── chroot: install hardware test tools ──────────────────────────────────────
+log_info "Installing hardware test tools (stress-ng, fio, i2c-tools, etc.) ..."
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \
+    stress-ng \
+    fio \
+    i2c-tools \
+    pciutils \
+    usbutils \
+    lshw \
+    hdparm \
+    alsa-utils \
+    iperf3 \
+    ethtool \
+    dmidecode \
+    bc \
+    python3 \
+    python3-pip \
+    python3-numpy \
+    python3-pil \
+    fonts-dejavu-core
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOTEOF
@@ -116,15 +146,32 @@ chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
 CHROOTEOF
 
-# ── install Mali GPU userspace (download on host, copy into rootfs) ──────────
-log_info "Installing Mali GPU userspace (libmali-valhall-g610) ..."
-MALI_DL="${TMP_DIR}/libmali-valhall-g610.so"
-if [[ ! -f "$MALI_DL" ]]; then
-    wget -q "${LIBMALI_URL}" -O "$MALI_DL"
-fi
-ensure_dir "${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu"
-cp "$MALI_DL" "${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu/libmali-valhall-g610.so"
-chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+# ── install GPU userspace (based on GPU_DRIVER setting) ─────────────────────
+if [[ "${GPU_DRIVER:-mali-blob}" == "panthor" ]]; then
+    # Panthor: install Mesa from Ubuntu repos (24.04 has Mesa 24.0+ with Panthor support)
+    log_info "Installing Mesa for Panthor GPU (open-source driver) ..."
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \
+    mesa-vulkan-drivers \
+    mesa-utils \
+    libgl1-mesa-dri \
+    libgles2 \
+    libegl1
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+CHROOTEOF
+else
+    # Mali blob: download and install proprietary userspace
+    log_info "Installing Mali GPU userspace (libmali-valhall-g610) ..."
+    MALI_DL="${TMP_DIR}/libmali-valhall-g610.so"
+    if [[ ! -f "$MALI_DL" ]]; then
+        wget -q "${LIBMALI_URL}" -O "$MALI_DL"
+    fi
+    ensure_dir "${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu"
+    cp "$MALI_DL" "${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu/libmali-valhall-g610.so"
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 cd /usr/lib/aarch64-linux-gnu
 ln -sf libmali-valhall-g610.so libmali.so
 ln -sf libmali.so libEGL.so.1
@@ -133,6 +180,7 @@ ln -sf libmali.so libgbm.so.1
 ln -sf libmali.so libOpenCL.so.1
 ldconfig
 CHROOTEOF
+fi
 
 # ── install RKNPU2 runtime (download on host, copy into rootfs) ─────────────
 log_info "Installing RKNPU2 runtime (librknnrt) ..."
@@ -152,7 +200,25 @@ cp "${RKNPU2_EXTRACT}/rknpu2-master/runtime/RK3588/Linux/rknn_server/aarch64/usr
     "${ROOTFS_DIR}/usr/bin/"
 chmod +x "${ROOTFS_DIR}/usr/bin/rknn_server" "${ROOTFS_DIR}/usr/bin/start_rknn.sh"
 chroot "$ROOTFS_DIR" ldconfig
+
+# Copy MobileNet RKNN model for NPU inference test
+MOBILENET_MODEL="${RKNPU2_EXTRACT}/rknpu2-master/examples/rknn_mobilenet_demo/model/RK3588/mobilenet_v1.rknn"
+if [[ -f "$MOBILENET_MODEL" ]]; then
+    log_info "Copying MobileNet RKNN model for NPU inference test ..."
+    ensure_dir "${ROOTFS_DIR}/usr/local/lib/hw-test/models"
+    cp "$MOBILENET_MODEL" "${ROOTFS_DIR}/usr/local/lib/hw-test/models/"
+else
+    log_info "MobileNet RKNN model not found in rknpu2 archive, skipping NPU inference test setup"
+fi
+
 rm -rf "$RKNPU2_EXTRACT"
+
+# ── install rknnlite2 Python runtime ─────────────────────────────────────────
+log_info "Installing rknn-toolkit-lite2 (Python RKNN runtime) ..."
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+pip3 install --no-cache-dir --break-system-packages rknn-toolkit-lite2 2>/dev/null || \
+    echo "WARNING: rknn-toolkit-lite2 install failed (inference test will be skipped)"
+CHROOTEOF
 
 # ── chroot: configure locale ────────────────────────────────────────────────
 chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
@@ -192,10 +258,56 @@ if [[ -d "$OVERLAY_DIR" ]]; then
     rsync -a "${OVERLAY_DIR}/" "${ROOTFS_DIR}/"
 fi
 
+# ── fix SSH authorized_keys ownership/permissions ──────────────────────────
+if [[ -d "${ROOTFS_DIR}/home/cpedge/.ssh" ]]; then
+    log_info "Setting SSH authorized_keys permissions ..."
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+chown -R cpedge:cpedge /home/cpedge/.ssh
+chmod 700 /home/cpedge/.ssh
+chmod 600 /home/cpedge/.ssh/authorized_keys
+CHROOTEOF
+fi
+
+# ── enable networking services and generate networkd configs ────────────────
+log_info "Enabling systemd-networkd, systemd-resolved, timesyncd, and generating netplan config ..."
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl enable systemd-networkd.service 2>/dev/null || true
+systemctl enable systemd-resolved.service 2>/dev/null || true
+systemctl enable systemd-timesyncd.service 2>/dev/null || true
+netplan generate 2>/dev/null || true
+CHROOTEOF
+
+# ── enable rootfs resize service ───────────────────────────────────────────
+if [[ -f "${ROOTFS_DIR}/usr/local/bin/resize-rootfs" ]]; then
+    log_info "Enabling first-boot rootfs resize service ..."
+    chmod +x "${ROOTFS_DIR}/usr/local/bin/resize-rootfs"
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable resize-rootfs-firstboot.service 2>/dev/null || true
+CHROOTEOF
+fi
+
+# ── enable hardware test service ────────────────────────────────────────────
+if [[ -f "${ROOTFS_DIR}/usr/local/bin/hw-test" ]]; then
+    log_info "Enabling hardware test first-boot service ..."
+    chmod +x "${ROOTFS_DIR}/usr/local/bin/hw-test"
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable hw-test-firstboot.service 2>/dev/null || true
+CHROOTEOF
+fi
+
 # ── final cleanup inside rootfs ─────────────────────────────────────────────
 rm -f "${ROOTFS_DIR}/usr/bin/qemu-aarch64-static" "${ROOTFS_DIR}/usr/bin/qemu-aarch64"
+# Write a static resolv.conf with systemd-resolved stub + public fallback.
+# The symlink to /run/systemd/resolve/stub-resolv.conf breaks if resolved
+# hasn't started yet, leaving DNS completely dead on first boot.
 rm -f "${ROOTFS_DIR}/etc/resolv.conf"
-# Restore a sensible resolv.conf symlink for systemd-resolved
-ln -sf /run/systemd/resolve/stub-resolv.conf "${ROOTFS_DIR}/etc/resolv.conf"
+cat > "${ROOTFS_DIR}/etc/resolv.conf" <<'DNSEOF'
+nameserver 127.0.0.53
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+options edns0 trust-ad
+DNSEOF
 
 log_step "Rootfs customization complete → ${ROOTFS_DIR}"

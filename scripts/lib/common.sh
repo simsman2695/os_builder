@@ -52,6 +52,18 @@ load_config() {
     # shellcheck disable=SC1090
     source "$board_conf"
 
+    # Load kernel profile (if specified in board config)
+    if [[ -n "${KERNEL_PROFILE:-}" ]]; then
+        local profile_conf="${BUILDER_DIR}/config/kernel-profiles/${KERNEL_PROFILE}.conf"
+        if [[ -f "$profile_conf" ]]; then
+            log_info "Loading kernel profile: ${KERNEL_PROFILE}"
+            # shellcheck disable=SC1090
+            source "$profile_conf"
+        else
+            die "Kernel profile not found: ${profile_conf}"
+        fi
+    fi
+
     # Resolve relative paths in global.conf to absolute
     KERNEL_SRC="$(cd "${BUILDER_DIR}" && realpath "${KERNEL_SRC}")"
     KERNELS_OUT="$(cd "${BUILDER_DIR}" && realpath -m "${KERNELS_OUT}")"

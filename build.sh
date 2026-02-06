@@ -16,6 +16,7 @@
 #
 # Stages:
 #   prerequisites   00 — verify host tools & kernel source
+#   fetch-kernel    01 — clone/switch kernel source based on KERNEL_PROFILE
 #   fetch-dts       01 — download Rock 5B DTS from Radxa
 #   kernel          02 — cross-compile kernel Image, DTBs, modules
 #   download-rootfs 03 — download Ubuntu arm64 base tarball
@@ -43,6 +44,7 @@ echo "Log file: ${LOG_FILE}"
 # ── stage map ────────────────────────────────────────────────────────────────
 declare -A STAGE_SCRIPT=(
     [prerequisites]="00-check-prerequisites.sh"
+    [fetch-kernel]="01-fetch-kernel.sh"
     [fetch-dts]="01-fetch-dts.sh"
     [kernel]="02-build-kernel.sh"
     [download-rootfs]="03-download-rootfs.sh"
@@ -51,7 +53,7 @@ declare -A STAGE_SCRIPT=(
     [image]="06-assemble-image.sh"
 )
 
-ALL_STAGES=(prerequisites fetch-dts kernel download-rootfs rootfs uboot image)
+ALL_STAGES=(prerequisites fetch-kernel fetch-dts kernel download-rootfs rootfs uboot image)
 
 # ── usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -73,6 +75,7 @@ BOARD="${1:-}"
 shift
 
 export USE_PREBUILT_UBOOT
+export KERNEL_PROFILE="${KERNEL_PROFILE:-}"
 
 # Validate board config exists
 [[ -f "${BUILDER_DIR}/config/boards/${BOARD}.conf" ]] \

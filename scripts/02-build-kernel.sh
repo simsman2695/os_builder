@@ -39,6 +39,19 @@ if [[ -v KERNEL_CONFIG_FRAGMENTS && ${#KERNEL_CONFIG_FRAGMENTS[@]} -gt 0 ]]; the
     make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" olddefconfig
 fi
 
+# ── merge extra config (e.g., Panthor for mainline) ─────────────────────────
+if [[ -n "${KERNEL_EXTRA_CONFIG:-}" ]]; then
+    extra_config_path="${BUILDER_DIR}/${KERNEL_EXTRA_CONFIG}"
+    if [[ -f "$extra_config_path" ]]; then
+        log_info "Merging extra config: ${KERNEL_EXTRA_CONFIG}"
+        ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
+            scripts/kconfig/merge_config.sh -m .config "$extra_config_path"
+        make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" olddefconfig
+    else
+        log_warn "Extra config not found: ${extra_config_path}"
+    fi
+fi
+
 # ── build Image ──────────────────────────────────────────────────────────────
 log_info "Building Image (${MAKE_JOBS} jobs) ..."
 make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \

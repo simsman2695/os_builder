@@ -1,0 +1,16 @@
+[Unit]
+Description=Grow root partition and filesystem to fill disk (first boot)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target systemd-sysusers.service systemd-tmpfiles-setup.service
+ConditionPathExists=!/var/lib/resize-rootfs/done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/resize-rootfs
+StandardOutput=journal
+StandardError=journal
+TimeoutSec=300
+
+[Install]
+WantedBy=sysinit.target
