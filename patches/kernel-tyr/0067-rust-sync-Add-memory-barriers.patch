@@ -1,0 +1,147 @@
+From fa4c89cff497ef5248a54b59d1f0330340aa540e Mon Sep 17 00:00:00 2001
+From: Boqun Feng <boqun.feng@gmail.com>
+Date: Mon, 21 Apr 2025 09:42:20 -0700
+Subject: [PATCH 067/161] rust: sync: Add memory barriers
+
+Memory barriers are building blocks for concurrent code, hence provide
+a minimal set of them.
+
+The compiler barrier, barrier(), is implemented in inline asm instead of
+using core::sync::atomic::compiler_fence() because memory models are
+different: kernel's atomics are implemented in inline asm therefore the
+compiler barrier should be implemented in inline asm as well.
+
+Signed-off-by: Boqun Feng <boqun.feng@gmail.com>
+---
+ rust/helpers/barrier.c      | 18 ++++++++++
+ rust/helpers/helpers.c      |  1 +
+ rust/kernel/sync.rs         |  1 +
+ rust/kernel/sync/barrier.rs | 67 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 87 insertions(+)
+ create mode 100644 rust/helpers/barrier.c
+ create mode 100644 rust/kernel/sync/barrier.rs
+
+diff --git a/rust/helpers/barrier.c b/rust/helpers/barrier.c
+new file mode 100644
+index 0000000000..cdf28ce8e5
+--- /dev/null
++++ b/rust/helpers/barrier.c
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <asm/barrier.h>
++
++void rust_helper_smp_mb(void)
++{
++	smp_mb();
++}
++
++void rust_helper_smp_wmb(void)
++{
++	smp_wmb();
++}
++
++void rust_helper_smp_rmb(void)
++{
++	smp_rmb();
++}
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index 1f652bd1be..5686d27c80 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -9,6 +9,7 @@
+ 
+ #include "auxiliary.c"
+ #include "atomic.c"
++#include "barrier.c"
+ #include "blk.c"
+ #include "bug.c"
+ #include "build_assert.c"
+diff --git a/rust/kernel/sync.rs b/rust/kernel/sync.rs
+index 7e962e5429..bf8943c88a 100644
+--- a/rust/kernel/sync.rs
++++ b/rust/kernel/sync.rs
+@@ -12,6 +12,7 @@
+ mod arc;
+ pub mod aref;
+ pub mod atomic;
++pub mod barrier;
+ pub mod completion;
+ mod condvar;
+ pub mod lock;
+diff --git a/rust/kernel/sync/barrier.rs b/rust/kernel/sync/barrier.rs
+new file mode 100644
+index 0000000000..277aa09747
+--- /dev/null
++++ b/rust/kernel/sync/barrier.rs
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! Memory barriers.
++//!
++//! These primitives have the same semantics as their C counterparts: and the precise definitions of
++//! semantics can be found at [`LKMM`].
++//!
++//! [`LKMM`]: srctree/tools/memory-mode/
++
++/// A compiler barrier.
++///
++/// An explicic compiler barrier function that prevents the compiler from moving the memory
++/// accesses either side of it to the other side.
++pub fn barrier() {
++    // By default, Rust inline asms are treated as being able to access any memory or flags, hence
++    // it suffices as a compiler barrier.
++    //
++    // SAFETY: An empty asm block should be safe.
++    unsafe {
++        core::arch::asm!("");
++    }
++}
++
++/// A full memory barrier.
++///
++/// A barrier function that prevents both the compiler and the CPU from moving the memory accesses
++/// either side of it to the other side.
++pub fn smp_mb() {
++    if cfg!(CONFIG_SMP) {
++        // SAFETY: `smp_mb()` is safe to call.
++        unsafe {
++            bindings::smp_mb();
++        }
++    } else {
++        barrier();
++    }
++}
++
++/// A write-write memory barrier.
++///
++/// A barrier function that prevents both the compiler and the CPU from moving the memory write
++/// accesses either side of it to the other side.
++pub fn smp_wmb() {
++    if cfg!(CONFIG_SMP) {
++        // SAFETY: `smp_wmb()` is safe to call.
++        unsafe {
++            bindings::smp_wmb();
++        }
++    } else {
++        barrier();
++    }
++}
++
++/// A read-read memory barrier.
++///
++/// A barrier function that prevents both the compiler and the CPU from moving the memory read
++/// accesses either side of it to the other side.
++pub fn smp_rmb() {
++    if cfg!(CONFIG_SMP) {
++        // SAFETY: `smp_rmb()` is safe to call.
++        unsafe {
++            bindings::smp_rmb();
++        }
++    } else {
++        barrier();
++    }
++}
+-- 
+2.51.0
+

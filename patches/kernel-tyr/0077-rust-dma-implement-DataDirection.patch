@@ -1,0 +1,113 @@
+From d33a4eb250f3fc0d8f0ecd7f03a376f918e4edb7 Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Mon, 25 Aug 2025 15:24:40 +0200
+Subject: [PATCH 077/161] rust: dma: implement DataDirection
+
+Add the `DataDirection` struct, a newtype wrapper around the C
+`enum dma_data_direction`.
+
+This provides a type-safe Rust interface for specifying the direction of
+DMA transfers.
+
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/bindings/bindings_helper.h |  1 +
+ rust/kernel/dma.rs              | 68 +++++++++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index 6fcdb19d1b..91e39e932a 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -51,6 +51,7 @@
+ #include <linux/cpumask.h>
+ #include <linux/cred.h>
+ #include <linux/delay.h>
++#include <linux/dma-direction.h>
+ #include <linux/dma-fence.h>
+ #include <linux/dma-fence-chain.h>
+ #include <linux/device/faux.h>
+diff --git a/rust/kernel/dma.rs b/rust/kernel/dma.rs
+index 2bc8ab51ec..27b25f041f 100644
+--- a/rust/kernel/dma.rs
++++ b/rust/kernel/dma.rs
+@@ -244,6 +244,74 @@ pub mod attrs {
+     pub const DMA_ATTR_PRIVILEGED: Attrs = Attrs(bindings::DMA_ATTR_PRIVILEGED);
+ }
+ 
++/// DMA data direction.
++///
++/// Corresponds to the C [`enum dma_data_direction`].
++///
++/// [`enum dma_data_direction`]: srctree/include/linux/dma-direction.h
++#[derive(Copy, Clone, PartialEq, Eq, Debug)]
++#[repr(u32)]
++pub enum DataDirection {
++    /// The DMA mapping is for bidirectional data transfer.
++    ///
++    /// This is used when the buffer can be both read from and written to by the device.
++    /// The cache for the corresponding memory region is both flushed and invalidated.
++    Bidirectional = Self::const_cast(bindings::dma_data_direction_DMA_BIDIRECTIONAL),
++
++    /// The DMA mapping is for data transfer from memory to the device (write).
++    ///
++    /// The CPU has prepared data in the buffer, and the device will read it.
++    /// The cache for the corresponding memory region is flushed before device access.
++    ToDevice = Self::const_cast(bindings::dma_data_direction_DMA_TO_DEVICE),
++
++    /// The DMA mapping is for data transfer from the device to memory (read).
++    ///
++    /// The device will write data into the buffer for the CPU to read.
++    /// The cache for the corresponding memory region is invalidated before CPU access.
++    FromDevice = Self::const_cast(bindings::dma_data_direction_DMA_FROM_DEVICE),
++
++    /// The DMA mapping is not for data transfer.
++    ///
++    /// This is primarily for debugging purposes. With this direction, the DMA mapping API
++    /// will not perform any cache coherency operations.
++    None = Self::const_cast(bindings::dma_data_direction_DMA_NONE),
++}
++
++impl DataDirection {
++    /// Casts the bindgen-generated enum type to a `u32` at compile time.
++    ///
++    /// This function will cause a compile-time error if the underlying value of the
++    /// C enum is out of bounds for `u32`.
++    const fn const_cast(val: bindings::dma_data_direction) -> u32 {
++        // CAST: The C standard allows compilers to choose different integer types for enums.
++        // To safely check the value, we cast it to a wide signed integer type (`i128`)
++        // which can hold any standard C integer enum type without truncation.
++        let wide_val = val as i128;
++
++        // Check if the value is outside the valid range for the target type `u32`.
++        // CAST: `u32::MAX` is cast to `i128` to match the type of `wide_val` for the comparison.
++        if wide_val < 0 || wide_val > u32::MAX as i128 {
++            // Trigger a compile-time error in a const context.
++            build_error!("C enum value is out of bounds for the target type `u32`.");
++        }
++
++        // CAST: This cast is valid because the check above guarantees that `wide_val`
++        // is within the representable range of `u32`.
++        wide_val as u32
++    }
++}
++
++impl From<DataDirection> for bindings::dma_data_direction {
++    /// Returns the raw representation of [`enum dma_data_direction`].
++    fn from(direction: DataDirection) -> Self {
++        // CAST: `direction as u32` gets the underlying representation of our `#[repr(u32)]` enum.
++        // The subsequent cast to `Self` (the bindgen type) assumes the C enum is compatible
++        // with the enum variants of `DataDirection`, which is a valid assumption given our
++        // compile-time checks.
++        direction as u32 as Self
++    }
++}
++
+ /// An abstraction of the `dma_alloc_coherent` API.
+ ///
+ /// This is an abstraction around the `dma_alloc_coherent` API which is used to allocate and map
+-- 
+2.51.0
+

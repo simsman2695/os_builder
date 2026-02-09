@@ -1,0 +1,40 @@
+From 39ccb6de3df861a60d5837f137f3c68fc22f43c8 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:18 -0400
+Subject: [PATCH 003/161] rust: drm: gem: Drop Object::SIZE
+
+Drive-by fix, it doesn't seem like anything actually uses this constant
+anymore.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+Reviewed-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/drm/gem/mod.rs | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index 80940ed113..b27b9fbf28 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -12,7 +12,7 @@
+     prelude::*,
+     types::{ARef, AlwaysRefCounted, Opaque},
+ };
+-use core::{mem, ops::Deref, ptr::NonNull};
++use core::{ops::Deref, ptr::NonNull};
+ 
+ /// A type alias for retrieving a [`Driver`]s [`DriverFile`] implementation from its
+ /// [`DriverObject`] implementation.
+@@ -197,9 +197,6 @@ pub struct Object<T: DriverObject + Send + Sync> {
+ }
+ 
+ impl<T: DriverObject> Object<T> {
+-    /// The size of this object's structure.
+-    pub const SIZE: usize = mem::size_of::<Self>();
+-
+     const OBJECT_FUNCS: bindings::drm_gem_object_funcs = bindings::drm_gem_object_funcs {
+         free: Some(Self::free_callback),
+         open: Some(open_callback::<T>),
+-- 
+2.51.0
+

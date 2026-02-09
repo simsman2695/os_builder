@@ -1,0 +1,50 @@
+From ea6b65a298d2fa207cf6e00f859bb128ab8d22c1 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 19 Nov 2025 09:35:59 -0300
+Subject: [PATCH 159/161] tyr: stop spamming "failed to enqueue" messages
+
+This is ok: it fails when the work is already queued.
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 12 +++---------
+ 1 file changed, 3 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index e213bc97ab..f879644191 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -166,9 +166,7 @@ fn process_csg_irq(
+ 
+             self.unsynced_groups.push(group, GFP_KERNEL)?;
+ 
+-            if self.wq.enqueue::<_, 3>(data.clone()).is_err() {
+-                pr_err!("Failed to enqueue the group update work\n");
+-            }
++            let _ = self.wq.enqueue::<_, 3>(data.clone());
+         }
+ 
+         glb.ring_csg_doorbell(csg_id as usize)
+@@ -245,9 +243,7 @@ pub(crate) fn set_events(&mut self, tdev: &TyrDevice, events: u32) {
+         let old_events = self.events.unwrap_or_default();
+         self.events = Some(events | old_events);
+ 
+-        if self.wq.enqueue::<_, 2>(tdev.deref().clone()).is_err() {
+-            pr_err!("Failed to enqueue firmware events work\n");
+-        }
++        let _ = self.wq.enqueue::<_, 2>(tdev.deref().clone());
+     }
+ 
+     fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+@@ -317,9 +313,7 @@ fn mark_group_idle(
+         if let None = &self.resched_target {
+             self.resched_target = Some(kernel::time::Instant::now());
+             let arc: Arc<TyrData> = data.clone();
+-            if self.wq.enqueue::<_, 1>(arc).is_err() {
+-                pr_err!("Failed to enqueue tick work\n");
+-            }
++            let _ = self.wq.enqueue::<_, 1>(arc);
+         }
+         Ok(())
+     }
+-- 
+2.51.0
+

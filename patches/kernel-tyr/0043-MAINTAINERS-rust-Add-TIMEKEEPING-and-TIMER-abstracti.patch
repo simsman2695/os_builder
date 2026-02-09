@@ -1,0 +1,37 @@
+From faa8c5f354b4c0d0d0ebeac3617fd85dd2af8ba9 Mon Sep 17 00:00:00 2001
+From: FUJITA Tomonori <fujita.tomonori@gmail.com>
+Date: Fri, 7 Feb 2025 22:26:21 +0900
+Subject: [PATCH 043/161] MAINTAINERS: rust: Add TIMEKEEPING and TIMER
+ abstractions
+
+Add Rust TIMEKEEPING and TIMER abstractions to the maintainers entry
+respectively.
+
+Signed-off-by: FUJITA Tomonori <fujita.tomonori@gmail.com>
+---
+ MAINTAINERS | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index fed6cd812d..0e8a8ebd6a 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -10932,6 +10932,7 @@ F:	kernel/time/sleep_timeout.c
+ F:	kernel/time/timer.c
+ F:	kernel/time/timer_list.c
+ F:	kernel/time/timer_migration.*
++F:	rust/kernel/time/delay.rs
+ F:	tools/testing/selftests/timers/
+ 
+ DELAY, SLEEP, TIMEKEEPING, TIMERS [RUST]
+@@ -25413,6 +25414,7 @@ F:	kernel/time/timeconv.c
+ F:	kernel/time/timecounter.c
+ F:	kernel/time/timekeeping*
+ F:	kernel/time/time_test.c
++F:	rust/kernel/time.rs
+ F:	tools/testing/selftests/timers/
+ 
+ TIPC NETWORK LAYER
+-- 
+2.51.0
+

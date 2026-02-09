@@ -1,0 +1,53 @@
+From cdcb7fd62ea3eabb09bfa5b25e527e7bab0bf9a4 Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:30 +0200
+Subject: [PATCH 017/161] rust: miscdevice: replace
+ `MaybeUninit::zeroed().assume_init()` with `pin_init::zeroed()`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/miscdevice.rs | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/rust/kernel/miscdevice.rs b/rust/kernel/miscdevice.rs
+index 6373fe183b..cecd1f2653 100644
+--- a/rust/kernel/miscdevice.rs
++++ b/rust/kernel/miscdevice.rs
+@@ -19,7 +19,7 @@
+     seq_file::SeqFile,
+     types::{ForeignOwnable, Opaque},
+ };
+-use core::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
++use core::{marker::PhantomData, pin::Pin};
+ 
+ /// Options for creating a misc device.
+ #[derive(Copy, Clone)]
+@@ -31,8 +31,7 @@ pub struct MiscDeviceOptions {
+ impl MiscDeviceOptions {
+     /// Create a raw `struct miscdev` ready for registration.
+     pub const fn into_raw<T: MiscDevice>(self) -> bindings::miscdevice {
+-        // SAFETY: All zeros is valid for this C type.
+-        let mut result: bindings::miscdevice = unsafe { MaybeUninit::zeroed().assume_init() };
++        let mut result: bindings::miscdevice = pin_init::zeroed();
+         result.minor = bindings::MISC_DYNAMIC_MINOR as ffi::c_int;
+         result.name = self.name.as_char_ptr();
+         result.fops = MiscdeviceVTable::<T>::build();
+@@ -359,8 +358,7 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
+         } else {
+             None
+         },
+-        // SAFETY: All zeros is a valid value for `bindings::file_operations`.
+-        ..unsafe { MaybeUninit::zeroed().assume_init() }
++        ..pin_init::zeroed()
+     };
+ 
+     const fn build() -> &'static bindings::file_operations {
+-- 
+2.51.0
+

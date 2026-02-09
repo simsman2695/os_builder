@@ -1,0 +1,35 @@
+From e20d44cea54bf3113c7b0ec27812c2b5d3d20ca9 Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:35 +0200
+Subject: [PATCH 022/161] rust: drm: replace `core::mem::zeroed` with
+ `pin_init::zeroed`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/drm/gem/mod.rs | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index 75ffd5541e..e0e991bfe2 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -466,9 +466,7 @@ pub(crate) fn into_raw(self) -> *mut bindings::dma_buf {
+ }
+ 
+ pub(super) const fn create_fops() -> bindings::file_operations {
+-    // SAFETY: As by the type invariant, it is safe to initialize `bindings::file_operations`
+-    // zeroed.
+-    let mut fops: bindings::file_operations = unsafe { core::mem::zeroed() };
++    let mut fops: bindings::file_operations = pin_init::zeroed();
+ 
+     fops.owner = core::ptr::null_mut();
+     fops.open = Some(bindings::drm_open);
+-- 
+2.51.0
+

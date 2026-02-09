@@ -1,0 +1,46 @@
+From acbcd1cff1fa90be54d6311438d14674ee08c5f5 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 28 Oct 2025 12:37:48 -0300
+Subject: [PATCH 143/161] tyr: remove broken poll condition in
+ ring_csg_doorbell
+
+Not only is the condition wrong - we would have to wait until the ack
+flipped, but we had hardcoded ack==1 instead - but to top it off, we
+don't need to wait at all here.
+
+Remove this to get rid of the massive 100ms delay before completing
+fences. This lets us go back to 30fps in weston-simple-egl and almost
+1000fps in kmscube at 4k.
+
+This fix apparently also makes the slowdown that we got after repeatedly
+running gfx apps disappear.
+---
+ drivers/gpu/drm/tyr/fw/global.rs | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/fw/global.rs b/drivers/gpu/drm/tyr/fw/global.rs
+index 6d53c953d1..4261fadfd6 100644
+--- a/drivers/gpu/drm/tyr/fw/global.rs
++++ b/drivers/gpu/drm/tyr/fw/global.rs
+@@ -442,18 +442,8 @@ pub(crate) fn set_csg_state(&mut self, csg_idx: usize, state: csg::GroupState) -
+     /// made on this CSG.
+     pub(crate) fn ring_csg_doorbell(&mut self, csg_idx: usize) -> Result {
+         self.doorbell_request()?.toggle_reqs(1 << csg_idx)?;
+-
+         self.ring_glb_doorbell()?;
+ 
+-        let op = || self.read_output();
+-        let cond = |output: &Output| -> bool { output.doorbell_ack == 1 };
+-        let _ = io::poll::read_poll_timeout(
+-            op,
+-            cond,
+-            time::Delta::from_millis(0),
+-            time::Delta::from_millis(100),
+-        );
+-
+         Ok(())
+     }
+ 
+-- 
+2.51.0
+

@@ -1,0 +1,308 @@
+From 07fa97c0b36038c418e8f903721be7c65ef5d63d Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Wed, 27 Aug 2025 13:38:39 +0000
+Subject: [PATCH 028/161] gpuvm: remove gem.gpuva.lock_dep_map
+
+Since all users of gem.gpuva.lock_dep_map now rely on the mutex directly
+in gpuva, we may remove it. Whether the mutex is used is now tracked by
+a flag in gpuvm rather than by whether lock_dep_map is null.
+
+Note that a GEM object may not be pushed to multiple gpuvms that
+disagree on the value of this new flag. But that's okay because a single
+driver should use the same locking scheme everywhere, and a GEM object
+is driver specific (when a GEM is exported with prime, a new GEM object
+instance is created from the backing dma-buf).
+
+The flag is present even with CONFIG_LOCKDEP=n because the intent is
+that the flag will also cause vm_bo cleanup to become deferred. However,
+that will happen in a follow-up patch.
+
+Reviewed-by: Boris Brezillon <boris.brezillon@collabora.com>
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/drm_gpuvm.c           | 30 +++++++++-----------
+ drivers/gpu/drm/panthor/panthor_gem.c |  1 -
+ drivers/gpu/drm/panthor/panthor_mmu.c |  5 ++--
+ include/drm/drm_gem.h                 | 41 ++++++++++-----------------
+ include/drm/drm_gpuvm.h               | 30 ++++++++++++++++++--
+ 5 files changed, 59 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_gpuvm.c b/drivers/gpu/drm/drm_gpuvm.c
+index 74d949995a..421c36578a 100644
+--- a/drivers/gpu/drm/drm_gpuvm.c
++++ b/drivers/gpu/drm/drm_gpuvm.c
+@@ -432,8 +432,7 @@
+  * DRM GPUVM also does not take care of the locking of the backing
+  * &drm_gem_object buffers GPU VA lists and &drm_gpuvm_bo abstractions by
+  * itself; drivers are responsible to enforce mutual exclusion using either the
+- * GEMs dma_resv lock or alternatively a driver specific external lock. For the
+- * latter see also drm_gem_gpuva_set_lock().
++ * GEMs dma_resv lock or the GEMs gpuva.lock mutex.
+  *
+  * However, DRM GPUVM contains lockdep checks to ensure callers of its API hold
+  * the corresponding lock whenever the &drm_gem_objects GPU VA list is accessed
+@@ -1512,7 +1511,7 @@ drm_gpuvm_bo_destroy(struct kref *kref)
+ 	drm_gpuvm_bo_list_del(vm_bo, extobj, lock);
+ 	drm_gpuvm_bo_list_del(vm_bo, evict, lock);
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(gpuvm, obj);
+ 	list_del(&vm_bo->list.entry.gem);
+ 
+ 	if (ops && ops->vm_bo_free)
+@@ -1533,7 +1532,8 @@ drm_gpuvm_bo_destroy(struct kref *kref)
+  * If the reference count drops to zero, the &gpuvm_bo is destroyed, which
+  * includes removing it from the GEMs gpuva list. Hence, if a call to this
+  * function can potentially let the reference count drop to zero the caller must
+- * hold the dma-resv or driver specific GEM gpuva lock.
++ * hold the lock that the GEM uses for its gpuva list (either the GEM's
++ * dma-resv or gpuva.lock mutex).
+  *
+  * This function may only be called from non-atomic context.
+  *
+@@ -1557,7 +1557,7 @@ __drm_gpuvm_bo_find(struct drm_gpuvm *gpuvm,
+ {
+ 	struct drm_gpuvm_bo *vm_bo;
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(gpuvm, obj);
+ 	drm_gem_for_each_gpuvm_bo(vm_bo, obj)
+ 		if (vm_bo->vm == gpuvm)
+ 			return vm_bo;
+@@ -1616,7 +1616,7 @@ drm_gpuvm_bo_obtain(struct drm_gpuvm *gpuvm,
+ 	if (!vm_bo)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(gpuvm, obj);
+ 	list_add_tail(&vm_bo->list.entry.gem, &obj->gpuva.list);
+ 
+ 	return vm_bo;
+@@ -1652,7 +1652,7 @@ drm_gpuvm_bo_obtain_prealloc(struct drm_gpuvm_bo *__vm_bo)
+ 		return vm_bo;
+ 	}
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(gpuvm, obj);
+ 	list_add_tail(&__vm_bo->list.entry.gem, &obj->gpuva.list);
+ 
+ 	return __vm_bo;
+@@ -1824,8 +1824,7 @@ EXPORT_SYMBOL_GPL(drm_gpuva_remove);
+  * reference of the latter is taken.
+  *
+  * This function expects the caller to protect the GEM's GPUVA list against
+- * concurrent access using either the GEMs dma_resv lock or a driver specific
+- * lock set through drm_gem_gpuva_set_lock().
++ * concurrent access using either the GEM's dma-resv or gpuva.lock mutex.
+  */
+ void
+ drm_gpuva_link(struct drm_gpuva *va, struct drm_gpuvm_bo *vm_bo)
+@@ -1840,7 +1839,7 @@ drm_gpuva_link(struct drm_gpuva *va, struct drm_gpuvm_bo *vm_bo)
+ 
+ 	va->vm_bo = drm_gpuvm_bo_get(vm_bo);
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(gpuvm, obj);
+ 	list_add_tail(&va->gem.entry, &vm_bo->list.gpuva);
+ }
+ EXPORT_SYMBOL_GPL(drm_gpuva_link);
+@@ -1860,8 +1859,7 @@ EXPORT_SYMBOL_GPL(drm_gpuva_link);
+  * the latter is dropped.
+  *
+  * This function expects the caller to protect the GEM's GPUVA list against
+- * concurrent access using either the GEMs dma_resv lock or a driver specific
+- * lock set through drm_gem_gpuva_set_lock().
++ * concurrent access using either the GEM's dma-resv or gpuva.lock mutex.
+  */
+ void
+ drm_gpuva_unlink(struct drm_gpuva *va)
+@@ -1872,7 +1870,7 @@ drm_gpuva_unlink(struct drm_gpuva *va)
+ 	if (unlikely(!obj))
+ 		return;
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
++	drm_gem_gpuva_assert_lock_held(va->vm, obj);
+ 	list_del_init(&va->gem.entry);
+ 
+ 	va->vm_bo = NULL;
+@@ -2806,8 +2804,8 @@ EXPORT_SYMBOL_GPL(drm_gpuvm_prefetch_ops_create);
+  * After the caller finished processing the returned &drm_gpuva_ops, they must
+  * be freed with &drm_gpuva_ops_free.
+  *
+- * It is the callers responsibility to protect the GEMs GPUVA list against
+- * concurrent access using the GEMs dma_resv lock.
++ * This function expects the caller to protect the GEM's GPUVA list against
++ * concurrent access using either the GEM's dma-resv or gpuva.lock mutex.
+  *
+  * Returns: a pointer to the &drm_gpuva_ops on success, an ERR_PTR on failure
+  */
+@@ -2819,7 +2817,7 @@ drm_gpuvm_bo_unmap_ops_create(struct drm_gpuvm_bo *vm_bo)
+ 	struct drm_gpuva *va;
+ 	int ret;
+ 
+-	drm_gem_gpuva_assert_lock_held(vm_bo->obj);
++	drm_gem_gpuva_assert_lock_held(vm_bo->vm, vm_bo->obj);
+ 
+ 	ops = kzalloc(sizeof(*ops), GFP_KERNEL);
+ 	if (!ops)
+diff --git a/drivers/gpu/drm/panthor/panthor_gem.c b/drivers/gpu/drm/panthor/panthor_gem.c
+index c654a33779..156c7a0b62 100644
+--- a/drivers/gpu/drm/panthor/panthor_gem.c
++++ b/drivers/gpu/drm/panthor/panthor_gem.c
+@@ -245,7 +245,6 @@ struct drm_gem_object *panthor_gem_create_object(struct drm_device *ddev, size_t
+ 
+ 	obj->base.base.funcs = &panthor_gem_funcs;
+ 	obj->base.map_wc = !ptdev->coherent;
+-	drm_gem_gpuva_set_lock(&obj->base.base, &obj->base.base.gpuva.lock);
+ 	mutex_init(&obj->label.lock);
+ 
+ 	panthor_gem_debugfs_bo_init(obj);
+diff --git a/drivers/gpu/drm/panthor/panthor_mmu.c b/drivers/gpu/drm/panthor/panthor_mmu.c
+index 49ca416c7c..26a231cfbe 100644
+--- a/drivers/gpu/drm/panthor/panthor_mmu.c
++++ b/drivers/gpu/drm/panthor/panthor_mmu.c
+@@ -2380,8 +2380,9 @@ panthor_vm_create(struct panthor_device *ptdev, bool for_mcu,
+ 	 * to be handled the same way user VMAs are.
+ 	 */
+ 	drm_gpuvm_init(&vm->base, for_mcu ? "panthor-MCU-VM" : "panthor-GPU-VM",
+-		       DRM_GPUVM_RESV_PROTECTED, &ptdev->base, dummy_gem,
+-		       min_va, va_range, 0, 0, &panthor_gpuvm_ops);
++		       DRM_GPUVM_RESV_PROTECTED | DRM_GPUVM_IMMEDIATE_MODE,
++		       &ptdev->base, dummy_gem, min_va, va_range, 0, 0,
++		       &panthor_gpuvm_ops);
+ 	drm_gem_object_put(dummy_gem);
+ 	return vm;
+ 
+diff --git a/include/drm/drm_gem.h b/include/drm/drm_gem.h
+index a995c0c1b6..f197ed6b3d 100644
+--- a/include/drm/drm_gem.h
++++ b/include/drm/drm_gem.h
+@@ -399,6 +399,12 @@ struct drm_gem_object {
+ 
+ 	/**
+ 	 * @gpuva: Fields used by GPUVM to manage mappings pointing to this GEM object.
++	 *
++	 * When DRM_GPUVM_IMMEDIATE_MODE is set, this list is protected by the
++	 * mutex. Otherwise, the list is protected by the GEMs &dma_resv lock.
++	 *
++	 * Note that all entries in this list must agree on whether
++	 * DRM_GPUVM_IMMEDIATE_MODE is set.
+ 	 */
+ 	struct {
+ 		/**
+@@ -412,17 +418,14 @@ struct drm_gem_object {
+ 
+ 		/**
+ 		 * @gpuva.lock: lock protecting access to &drm_gem_object.gpuva.list
+-		 * when the resv lock can't be used.
++		 * when DRM_GPUVM_IMMEDIATE_MODE is used.
+ 		 *
+-		 * Should only be used when the VM is being modified in a fence
+-		 * signalling path, otherwise you should use &drm_gem_object.resv to
+-		 * protect accesses to &drm_gem_object.gpuva.list.
++		 * Only used when DRM_GPUVM_IMMEDIATE_MODE is set. It should be
++		 * safe to take this mutex during the fence signalling path, so
++		 * do not allocate memory while holding this lock. Otherwise,
++		 * the &dma_resv lock should be used.
+ 		 */
+ 		struct mutex lock;
+-
+-#ifdef CONFIG_LOCKDEP
+-		struct lockdep_map *lock_dep_map;
+-#endif
+ 	} gpuva;
+ 
+ 	/**
+@@ -607,26 +610,12 @@ static inline bool drm_gem_is_imported(const struct drm_gem_object *obj)
+ }
+ 
+ #ifdef CONFIG_LOCKDEP
+-/**
+- * drm_gem_gpuva_set_lock() - Set the lock protecting accesses to the gpuva list.
+- * @obj: the &drm_gem_object
+- * @lock: the lock used to protect the gpuva list. The locking primitive
+- * must contain a dep_map field.
+- *
+- * Call this if you're not proctecting access to the gpuva list with the
+- * dma-resv lock, but with a custom lock.
+- */
+-#define drm_gem_gpuva_set_lock(obj, lock) \
+-	if (!WARN((obj)->gpuva.lock_dep_map, \
+-		  "GEM GPUVA lock should be set only once.")) \
+-		(obj)->gpuva.lock_dep_map = &(lock)->dep_map
+-#define drm_gem_gpuva_assert_lock_held(obj) \
+-	lockdep_assert((obj)->gpuva.lock_dep_map ? \
+-		       lock_is_held((obj)->gpuva.lock_dep_map) : \
++#define drm_gem_gpuva_assert_lock_held(gpuvm, obj) \
++	lockdep_assert(drm_gpuvm_immediate_mode(gpuvm) ? \
++		       lock_is_held(&(obj)->gpuva.lock.dep_map) : \
+ 		       dma_resv_held((obj)->resv))
+ #else
+-#define drm_gem_gpuva_set_lock(obj, lock) do {} while (0)
+-#define drm_gem_gpuva_assert_lock_held(obj) do {} while (0)
++#define drm_gem_gpuva_assert_lock_held(gpuvm, obj) do {} while (0)
+ #endif
+ 
+ /**
+diff --git a/include/drm/drm_gpuvm.h b/include/drm/drm_gpuvm.h
+index 274532facf..23229f617e 100644
+--- a/include/drm/drm_gpuvm.h
++++ b/include/drm/drm_gpuvm.h
+@@ -205,10 +205,20 @@ enum drm_gpuvm_flags {
+ 	 */
+ 	DRM_GPUVM_RESV_PROTECTED = BIT(0),
+ 
++	/**
++	 * @DRM_GPUVM_IMMEDIATE_MODE: use the locking scheme for GEMs designed
++	 * for modifying the GPUVM during the fence signalling path
++	 *
++	 * When set, gpuva.lock is used to protect gpuva.list in all GEM
++	 * objects associated with this GPUVM. Otherwise, the GEMs dma-resv is
++	 * used.
++	 */
++	DRM_GPUVM_IMMEDIATE_MODE = BIT(1),
++
+ 	/**
+ 	 * @DRM_GPUVM_USERBITS: user defined bits
+ 	 */
+-	DRM_GPUVM_USERBITS = BIT(1),
++	DRM_GPUVM_USERBITS = BIT(2),
+ };
+ 
+ /**
+@@ -378,6 +388,19 @@ drm_gpuvm_resv_protected(struct drm_gpuvm *gpuvm)
+ 	return gpuvm->flags & DRM_GPUVM_RESV_PROTECTED;
+ }
+ 
++/**
++ * drm_gpuvm_immediate_mode() - indicates whether &DRM_GPUVM_IMMEDIATE_MODE is
++ * set
++ * @gpuvm: the &drm_gpuvm
++ *
++ * Returns: true if &DRM_GPUVM_IMMEDIATE_MODE is set, false otherwise.
++ */
++static inline bool
++drm_gpuvm_immediate_mode(struct drm_gpuvm *gpuvm)
++{
++	return gpuvm->flags & DRM_GPUVM_IMMEDIATE_MODE;
++}
++
+ /**
+  * drm_gpuvm_resv() - returns the &drm_gpuvm's &dma_resv
+  * @gpuvm__: the &drm_gpuvm
+@@ -751,9 +774,10 @@ drm_gpuvm_bo_gem_evict(struct drm_gem_object *obj, bool evict)
+ {
+ 	struct drm_gpuvm_bo *vm_bo;
+ 
+-	drm_gem_gpuva_assert_lock_held(obj);
+-	drm_gem_for_each_gpuvm_bo(vm_bo, obj)
++	drm_gem_for_each_gpuvm_bo(vm_bo, obj) {
++		drm_gem_gpuva_assert_lock_held(vm_bo->vm, obj);
+ 		drm_gpuvm_bo_evict(vm_bo, evict);
++	}
+ }
+ 
+ void drm_gpuvm_bo_extobj_add(struct drm_gpuvm_bo *vm_bo);
+-- 
+2.51.0
+

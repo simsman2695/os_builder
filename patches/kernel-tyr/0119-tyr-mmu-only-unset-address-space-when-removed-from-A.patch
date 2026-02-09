@@ -1,0 +1,44 @@
+From 5e50d6a71509c585d96414f7fd8e650e0d15342b Mon Sep 17 00:00:00 2001
+From: Andrew Ballance <andrewjballance@gmail.com>
+Date: Sun, 28 Sep 2025 01:18:08 -0500
+Subject: [PATCH 119/161] tyr: mmu: only unset address space when removed from
+ AS slot
+
+a vm's address space should not be set to none without it being removed
+from the firmware and prevent using an as slot that does not exist.
+
+Signed-off-by: Andrew Ballance <andrewjballance@gmail.com>
+---
+ drivers/gpu/drm/tyr/mmu.rs    | 3 +++
+ drivers/gpu/drm/tyr/mmu/vm.rs | 1 -
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu.rs b/drivers/gpu/drm/tyr/mmu.rs
+index 5e910a19c2..17626e3f06 100644
+--- a/drivers/gpu/drm/tyr/mmu.rs
++++ b/drivers/gpu/drm/tyr/mmu.rs
+@@ -117,6 +117,9 @@ pub(crate) fn bind_vm(
+ 
+         let memattr = vm.memattr;
+         let as_nr = self.slots.find_slot(vm.for_mcu)?;
++        if gpu_info.as_present & (1 << as_nr)  == 0 {
++            return Err(EBUSY);
++        }
+         Self::enable_as(iomem, as_nr, transtab, transcfg.into(), memattr)?;
+         self.slots.alloc_slot(as_nr);
+         vm.address_space = Some(as_nr);
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index bbe9ee317e..3c5409d107 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -248,7 +248,6 @@ pub(crate) fn unmap_all(&mut self, iomem: Arc<Devres<IoMem>>) -> Result {
+         let range = self.gpuvm.va_range();
+ 
+         self.unmap_range(iomem, range)?;
+-        self.address_space = None;
+ 
+         Ok(())
+     }
+-- 
+2.51.0
+

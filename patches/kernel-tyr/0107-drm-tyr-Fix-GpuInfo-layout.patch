@@ -1,0 +1,86 @@
+From b5cbc4a8c8b58e2119867eead605f7659f2640c9 Mon Sep 17 00:00:00 2001
+From: Boris Brezillon <boris.brezillon@collabora.com>
+Date: Wed, 15 Oct 2025 10:14:23 +0200
+Subject: [PATCH 107/161] drm/tyr: Fix GpuInfo layout
+
+We should really have this auto-generated with bindgen.
+---
+ drivers/gpu/drm/tyr/gpu.rs | 44 +++++++++++++++++++++-----------------
+ 1 file changed, 24 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/gpu.rs b/drivers/gpu/drm/tyr/gpu.rs
+index 92e97ee8ff..9c9f48be1b 100644
+--- a/drivers/gpu/drm/tyr/gpu.rs
++++ b/drivers/gpu/drm/tyr/gpu.rs
+@@ -17,9 +17,8 @@
+ // This can be queried by userspace to get information about the GPU.
+ pub(crate) struct GpuInfo {
+     pub(crate) gpu_id: u32,
+-    pub(crate) csf_id: u32,
+     pub(crate) gpu_rev: u32,
+-    pub(crate) core_features: u32,
++    pub(crate) csf_id: u32,
+     pub(crate) l2_features: u32,
+     pub(crate) tiler_features: u32,
+     pub(crate) mem_features: u32,
+@@ -31,9 +30,12 @@ pub(crate) struct GpuInfo {
+     pub(crate) coherency_features: u32,
+     pub(crate) texture_features: [u32; 4],
+     pub(crate) as_present: u32,
++    pub(crate) pad0: u32,
+     pub(crate) shader_present: u64,
+-    pub(crate) tiler_present: u64,
+     pub(crate) l2_present: u64,
++    pub(crate) tiler_present: u64,
++    pub(crate) core_features: u32,
++    pub(crate) pad: u32,
+ }
+ 
+ impl GpuInfo {
+@@ -66,24 +68,26 @@ pub(crate) fn new(iomem: &Devres<IoMem>) -> Result<Self> {
+         let l2_present = l2_present | (GPU_L2_PRESENT_HI.read(iomem)? as u64) << 32;
+ 
+         Ok(Self {
+-            gpu_id,
+-            csf_id,
+-            gpu_rev,
+-            core_features,
+-            l2_features,
+-            tiler_features,
+-            mem_features,
+-            mmu_features,
+-            thread_features,
+-            max_threads,
+-            thread_max_workgroup_size,
+-            thread_max_barrier_size,
+-            coherency_features,
++            gpu_id: gpu_id,
++            csf_id: csf_id,
++            gpu_rev: gpu_rev,
++            core_features: core_features,
++            l2_features: l2_features,
++            tiler_features: tiler_features,
++            mem_features: mem_features,
++            mmu_features: mmu_features,
++            thread_features: thread_features,
++            max_threads: max_threads,
++            thread_max_workgroup_size: thread_max_workgroup_size,
++            thread_max_barrier_size: thread_max_barrier_size,
++            coherency_features: coherency_features,
+             texture_features: [texture_features, 0, 0, 0],
+-            as_present,
+-            shader_present,
+-            tiler_present,
+-            l2_present,
++            as_present: as_present,
++            shader_present: shader_present,
++            tiler_present: tiler_present,
++            l2_present: l2_present,
++            pad0: 0,
++            pad: 0,
+         })
+     }
+ 
+-- 
+2.51.0
+

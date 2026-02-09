@@ -1,0 +1,34 @@
+From f74ee52a1461c5c445c63484988151e53f2f6025 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 18 Nov 2025 17:02:40 -0300
+Subject: [PATCH 156/161] tyr: don't signal fences directly on timeout
+
+If other jobs are submitted, we will just signal the fence in the
+CSG_SYNC_UPDATE handler.
+
+This is incorrect, as the right thing to do would be to reset the GPU and
+then spawn a work to process all leftover fences, setting an error on all
+of them.
+
+Still, this is good enough for a demo.
+---
+ drivers/gpu/drm/tyr/sched/job.rs | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/job.rs b/drivers/gpu/drm/tyr/sched/job.rs
+index ddb0353c37..05c058f619 100644
+--- a/drivers/gpu/drm/tyr/sched/job.rs
++++ b/drivers/gpu/drm/tyr/sched/job.rs
+@@ -193,9 +193,6 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+     fn timed_out(job: &mut kernel::drm::sched::Job<Self>) -> kernel::drm::sched::Status {
+         pr_err!("Job timed out\n");
+ 
+-        job.done_fence.set_error(ETIMEDOUT);
+-        let _ = job.done_fence.signal();
+-
+         kernel::drm::sched::Status::NoDevice
+     }
+ }
+-- 
+2.51.0
+

@@ -1,0 +1,39 @@
+From f5edd29fc37249250d001020ee81dd572df9fdbc Mon Sep 17 00:00:00 2001
+From: Boris Brezillon <boris.brezillon@collabora.com>
+Date: Wed, 15 Oct 2025 10:21:41 +0200
+Subject: [PATCH 109/161] [HACK] drm: Expose render nodes
+
+The set of features should be selected by each driver, not hardcoded.
+---
+ rust/kernel/drm/device.rs | 2 +-
+ rust/kernel/drm/driver.rs | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index 4ba56bfa29..16bd7b9410 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -88,7 +88,7 @@ impl<T: drm::Driver> Device<T> {
+         name: T::INFO.name.as_char_ptr().cast_mut(),
+         desc: T::INFO.desc.as_char_ptr().cast_mut(),
+ 
+-        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA | drm::driver::FEAT_SYNCOBJ,
++        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA | drm::driver::FEAT_SYNCOBJ | drm::driver::FEAT_RENDER,
+         ioctls: T::IOCTLS.as_ptr(),
+         num_ioctls: T::IOCTLS.len() as i32,
+         fops: &Self::GEM_FOPS,
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index 917fa01852..fd821850d8 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -16,6 +16,7 @@
+ pub(crate) const FEAT_GEM: u32 = bindings::drm_driver_feature_DRIVER_GEM;
+ pub(crate) const FEAT_GEM_GPUVA: u32 = bindings::drm_driver_feature_DRIVER_GEM_GPUVA;
+ pub(crate) const FEAT_SYNCOBJ: u32 = bindings::drm_driver_feature_DRIVER_SYNCOBJ;
++pub(crate) const FEAT_RENDER: u32 = bindings::drm_driver_feature_DRIVER_RENDER;
+ 
+ /// Information data for a DRM Driver.
+ pub struct DriverInfo {
+-- 
+2.51.0
+

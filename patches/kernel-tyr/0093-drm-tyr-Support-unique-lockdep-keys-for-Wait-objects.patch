@@ -1,0 +1,117 @@
+From e48325085aa85164d01de0e71e98cb0b6aa3fb40 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Tue, 1 Jul 2025 13:09:15 +0200
+Subject: [PATCH 093/161] drm: tyr: Support unique lockdep keys for Wait
+ objects
+
+Introduce the new_wait! macro to construct Wait<T> instances with
+lockdep class keys tied to the call site. This ensures proper lockdep
+tracking.
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ drivers/gpu/drm/tyr/driver.rs |  3 +-
+ drivers/gpu/drm/tyr/wait.rs   | 59 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/driver.rs b/drivers/gpu/drm/tyr/driver.rs
+index e210db59bd..8cd71bf65f 100644
+--- a/drivers/gpu/drm/tyr/driver.rs
++++ b/drivers/gpu/drm/tyr/driver.rs
+@@ -50,6 +50,7 @@
+ use crate::regs::*;
+ use crate::sched::Scheduler;
+ use crate::sched::SchedulerState;
++use crate::new_wait;
+ use crate::wait::Wait;
+ use crate::wait::WaitResult;
+ 
+@@ -237,7 +238,7 @@ fn probe(
+         let mmu = KBox::pin_init(new_mutex!(Mmu::new()?), GFP_KERNEL)?;
+ 
+         let fw_event_wait = Wait::new()?;
+-        let fw_boot_wait = Wait::new()?;
++        let fw_boot_wait = new_wait!()?;
+         let fw = Firmware::init(
+             &tdev,
+             pdev,
+diff --git a/drivers/gpu/drm/tyr/wait.rs b/drivers/gpu/drm/tyr/wait.rs
+index bbba8fd951..3959926cb5 100644
+--- a/drivers/gpu/drm/tyr/wait.rs
++++ b/drivers/gpu/drm/tyr/wait.rs
+@@ -9,6 +9,49 @@
+ use kernel::sync::CondVar;
+ use kernel::sync::Mutex;
+ use kernel::time::msecs_to_jiffies;
++use kernel::sync::lock::Lock;
++use kernel::sync::lock::mutex::MutexBackend;
++
++/// Creates a new `Wait<T>` instance with call-site-specific lockdep class key.
++///
++/// # Usage
++/// - `new_wait!()`                 → creates `Wait<()>`
++/// - `new_wait!(data)`             → creates `Wait<T>` with `data: T`
++/// - `new_wait!(data, "name")`     → creates `Wait<T>` with named lock class
++///
++/// This macro ensures proper per-call-site lock tracking.
++///
++/// The underlying `Wait::new_with_lock()` function should **not** be
++/// used directly; it is only provided to support this macro's expansion.
++///
++/// Always prefer this macro to construct `Wait` object for cases when
++/// the object is expected to have rather unique locking behaviour, that
++/// might otherwise trigger false-positive lockdep warnings.
++/// In other cases, 'Wait::new()' is expected to be used.
++///
++/// ### Example
++/// ```
++/// let wait = new_wait!()?;
++/// let wait = new_wait!(data)?;
++/// let wait = new_wait!(false, "named_lock")?;
++/// ```
++#[macro_export]
++macro_rules! new_wait {
++    () => {{
++        let lock = new_mutex!(());
++        $crate::wait::Wait::new_with_lock(lock)
++    }};
++    ($data:expr) => {{
++        let lock = new_mutex!($data);
++        $crate::wait::Wait::new_with_lock(lock)
++    }};
++    ($data:expr, $name:literal) => {{
++        let lock = new_mutex!($data, $name);
++        $crate::wait::Wait::new_with_lock(lock)
++    }}
++}
++
++pub(crate) use new_wait;
+ 
+ #[pin_data]
+ /// A convenience type to wait for GPU responses.
+@@ -55,6 +98,22 @@ pub(crate) fn new_with_data(data: T) -> Result<Arc<Self>> {
+         )
+     }
+ 
++    /// A convenience function to initilaize the `Wait` struct
++    /// with provided Lock instance
++    ///
++    /// Use [`new_wait!`] instead.
++    pub(crate) fn new_with_lock(
++        lock: impl PinInit<Lock<T, MutexBackend>>
++    ) -> Result<Arc<Self>> {
++        Arc::pin_init(
++            pin_init!(Self {
++                cond <- new_condvar!(),
++                lock <- lock,
++            }),
++            GFP_KERNEL,
++        )
++    }
++
+     /// Wait until the GPU responds.
+     ///
+     /// This will trigger on all responses and it is up to the caller to react
+-- 
+2.51.0
+

@@ -1,0 +1,30 @@
+From 30a7f18b5eaa0cfa8f8a475f6104ba17524bc3e7 Mon Sep 17 00:00:00 2001
+From: Andrew Ballance <andrewjballance@gmail.com>
+Date: Sun, 28 Sep 2025 00:50:17 -0500
+Subject: [PATCH 118/161] tyr: sched: fix dropped events
+
+if an irq sets events multiple times between fw_events_work some events
+will be forgotten. so, ensure that events are not forgotten.
+
+Signed-off-by: Andrew Ballance <andrewjballance@gmail.com>
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index b8d2ff5ffa..860c07ccc7 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -240,7 +240,8 @@ fn process_cs_irq(
+     }
+ 
+     pub(crate) fn set_events(&mut self, tdev: &TyrDevice, events: u32) {
+-        self.events = Some(events);
++        let old_events = self.events.unwrap_or_default();
++        self.events = Some(events | old_events);
+ 
+         if self.wq.enqueue::<_, 2>(tdev.deref().clone()).is_err() {
+             pr_err!("Failed to enqueue firmware events work\n");
+-- 
+2.51.0
+

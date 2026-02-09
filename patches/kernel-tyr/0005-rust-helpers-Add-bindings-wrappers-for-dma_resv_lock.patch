@@ -1,0 +1,65 @@
+From 4f840fcd7359f884b903d3689c50068ce8a062c7 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Fri, 29 Aug 2025 18:35:20 -0400
+Subject: [PATCH 005/161] rust: helpers: Add bindings/wrappers for
+ dma_resv_lock
+
+This is just for basic usage in the DRM shmem abstractions for implied
+locking, not intended as a full DMA Reservation abstraction yet.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+Signed-off-by: Daniel Almeida <daniel.almeida@collabora.com>
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ rust/bindings/bindings_helper.h |  1 +
+ rust/helpers/dma-resv.c         | 13 +++++++++++++
+ rust/helpers/helpers.c          |  1 +
+ 3 files changed, 15 insertions(+)
+ create mode 100644 rust/helpers/dma-resv.c
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index 84d60635e8..98654be04c 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -48,6 +48,7 @@
+ #include <linux/cred.h>
+ #include <linux/device/faux.h>
+ #include <linux/dma-mapping.h>
++#include <linux/dma-resv.h>
+ #include <linux/errname.h>
+ #include <linux/ethtool.h>
+ #include <linux/file.h>
+diff --git a/rust/helpers/dma-resv.c b/rust/helpers/dma-resv.c
+new file mode 100644
+index 0000000000..05501cb814
+--- /dev/null
++++ b/rust/helpers/dma-resv.c
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/dma-resv.h>
++
++int rust_helper_dma_resv_lock(struct dma_resv *obj, struct ww_acquire_ctx *ctx)
++{
++	return dma_resv_lock(obj, ctx);
++}
++
++void rust_helper_dma_resv_unlock(struct dma_resv *obj)
++{
++	dma_resv_unlock(obj);
++}
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index 7cf7fe95e4..b23c1818da 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -20,6 +20,7 @@
+ #include "cred.c"
+ #include "device.c"
+ #include "dma.c"
++#include "dma-resv.c"
+ #include "drm.c"
+ #include "err.c"
+ #include "fs.c"
+-- 
+2.51.0
+

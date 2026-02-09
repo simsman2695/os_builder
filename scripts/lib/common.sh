@@ -64,6 +64,17 @@ load_config() {
         fi
     fi
 
+    # Apply Tyr GPU driver overrides (must come after kernel profile)
+    # Tyr patches are applied on top of the 6.18 kernel in 02-build-kernel.sh
+    if [[ "${USE_TYR:-false}" == "true" ]]; then
+        [[ "${KERNEL_PROFILE:-}" == "6.18" ]] \
+            || die "--tyr requires KERNEL_PROFILE=6.18"
+        log_info "Tyr mode: Rust GPU driver (patches applied at build time)"
+        KERNEL_EXTRA_CONFIG="config/kernel/rk3588-tyr.config"
+        GPU_DRIVER="tyr"
+        KERNEL_LLVM="1"
+    fi
+
     # Resolve relative paths in global.conf to absolute
     KERNEL_SRC="$(cd "${BUILDER_DIR}" && realpath "${KERNEL_SRC}")"
     KERNELS_OUT="$(cd "${BUILDER_DIR}" && realpath -m "${KERNELS_OUT}")"

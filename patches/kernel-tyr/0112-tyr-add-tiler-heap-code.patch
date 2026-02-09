@@ -1,0 +1,600 @@
+From 62f18e57242a5bb588c46f8f223ffee3134ceb9a Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 13 Oct 2025 16:51:22 -0300
+Subject: [PATCH 112/161] tyr: add tiler heap code
+
+---
+ drivers/gpu/drm/tyr/driver.rs       |   3 +
+ drivers/gpu/drm/tyr/file.rs         |  78 +++++++
+ drivers/gpu/drm/tyr/gpu.rs          |   5 +
+ drivers/gpu/drm/tyr/heap.rs         | 315 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/tyr/mmu/vm.rs       |   1 +
+ drivers/gpu/drm/tyr/regs.rs         |   3 +
+ drivers/gpu/drm/tyr/sched/events.rs |  52 +++++
+ drivers/gpu/drm/tyr/tyr.rs          |   1 +
+ 8 files changed, 458 insertions(+)
+ create mode 100644 drivers/gpu/drm/tyr/heap.rs
+
+diff --git a/drivers/gpu/drm/tyr/driver.rs b/drivers/gpu/drm/tyr/driver.rs
+index e72b054e63..044f9557ad 100644
+--- a/drivers/gpu/drm/tyr/driver.rs
++++ b/drivers/gpu/drm/tyr/driver.rs
+@@ -369,6 +369,9 @@ impl drm::driver::Driver for TyrDriver {
+         (PANTHOR_GROUP_CREATE, drm_panthor_group_create, ioctl::RENDER_ALLOW, File::group_create),
+         (PANTHOR_GROUP_DESTROY, drm_panthor_group_destroy, ioctl::RENDER_ALLOW, File::group_destroy),
+         (PANTHOR_GROUP_SUBMIT, drm_panthor_group_submit, ioctl::RENDER_ALLOW, File::group_submit),
++        (PANTHOR_GROUP_GET_STATE, drm_panthor_group_get_state, ioctl::RENDER_ALLOW, File::group_get_state),
++        (PANTHOR_TILER_HEAP_CREATE, drm_panthor_tiler_heap_create, ioctl::RENDER_ALLOW, File::heap_create),
++        (PANTHOR_TILER_HEAP_DESTROY, drm_panthor_tiler_heap_destroy, ioctl::RENDER_ALLOW, File::heap_destroy),
+     }
+ }
+ 
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 06ee853f97..bc2b1a2cf1 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -4,6 +4,7 @@
+ use core::ops::DerefMut;
+ 
+ use kernel::alloc::flags::*;
++use kernel::bits::genmask_u32;
+ use kernel::drm;
+ use kernel::drm::device::Device as DrmDevice;
+ use kernel::drm::gem::BaseObject;
+@@ -13,10 +14,13 @@
+ use kernel::types::ARef;
+ use kernel::uaccess::UserSlice;
+ use kernel::uapi;
++use kernel::xarray;
++use kernel::xarray::XArray;
+ 
+ use crate::driver::TyrDevice;
+ use crate::driver::TyrDriver;
+ use crate::gem;
++use crate::heap;
+ use crate::mmu::vm;
+ use crate::mmu::vm::pool::Pool;
+ use crate::mmu::vm::VmLayout;
+@@ -30,6 +34,12 @@ pub(crate) struct File {
+     vm_pool: Pool,
+ 
+     group_pool: group::Pool,
++
++    /// Heap pools, indexed by VM ID.
++    ///
++    /// Each VM can have its own heap pool for tiler heap management.
++    /// The heap pool is created on-demand when the first heap context is created.
++    heap_pools: Pin<KBox<XArray<KBox<heap::Pool>>>>,
+ }
+ 
+ /// Convenience type alias for our DRM `File` type
+@@ -45,6 +55,7 @@ fn open(dev: &DrmDevice<Self::Driver>) -> Result<Pin<KBox<Self>>> {
+             try_pin_init!(Self {
+                 vm_pool: Pool::create()?,
+                 group_pool: group::Pool::create()?,
++                heap_pools <- KBox::pin_init(XArray::new(xarray::AllocKind::Alloc1), GFP_KERNEL)?,
+             }),
+             GFP_KERNEL,
+         )
+@@ -363,6 +374,73 @@ pub(crate) fn group_submit(
+ 
+         Ok(0)
+     }
++
++    pub(crate) fn group_get_state(
++        _tdev: &TyrDevice,
++        _groupgetstate: &mut uapi::drm_panthor_group_get_state,
++        _file: &DrmFile,
++    ) -> Result<u32> {
++        Err(ENOTSUPP)
++    }
++
++    pub(crate) fn heap_create(
++        tdev: &TyrDevice,
++        heapcreate: &mut uapi::drm_panthor_tiler_heap_create,
++        file: &DrmFile,
++    ) -> Result<u32> {
++        let vm_id = heapcreate.vm_id as usize;
++        let vm = file.inner().vm_pool().get_vm(vm_id).ok_or(EINVAL)?;
++
++        let args = heap::ContextCreateArgs {
++            initial_chunk_count: heapcreate.initial_chunk_count,
++            chunk_size: heapcreate.chunk_size,
++            max_chunks: heapcreate.max_chunks,
++            target_in_flight: heapcreate.target_in_flight,
++        };
++
++        // Create the heap pool for this VM if it doesn't exist yet
++        let file_inner = file.inner();
++        let xa = file_inner.heap_pools.as_ref();
++
++        {
++            let guard = xa.lock();
++            if guard.get(vm_id).is_none() {
++                drop(guard); // Release lock before creating pool
++                let pool = KBox::new(
++                    heap::Pool::create(tdev, tdev.iomem.clone(), vm.clone())?,
++                    GFP_KERNEL,
++                )?;
++                xa.lock().store(vm_id, pool, GFP_KERNEL)?;
++            }
++        }
++
++        let guard = xa.lock();
++        let pool = guard.get(vm_id).ok_or(EINVAL)?;
++        let created_context = pool.create_heap_context(tdev, args)?;
++
++        heapcreate.handle = heapcreate.vm_id << 16 | created_context.context_id as u32;
++        heapcreate.tiler_heap_ctx_gpu_va = created_context.context_gpu_va;
++        heapcreate.first_heap_chunk_gpu_va = created_context.first_chunk_gpu_va;
++
++        Ok(0)
++    }
++
++    pub(crate) fn heap_destroy(
++        _tdev: &TyrDevice,
++        heapdestroy: &mut uapi::drm_panthor_tiler_heap_destroy,
++        file: &DrmFile,
++    ) -> Result<u32> {
++        let vm_id = (heapdestroy.handle >> 16) as usize;
++        let heap_idx = (heapdestroy.handle & genmask_u32(0..=15)) as usize;
++
++        let file_inner = file.inner();
++        let xa = file_inner.heap_pools.as_ref();
++        let guard = xa.lock();
++        let pool = guard.get(vm_id).ok_or(EINVAL)?;
++        pool.destroy_heap_context(heap_idx).ok_or(EINVAL)?;
++
++        Ok(0)
++    }
+ }
+ 
+ #[repr(transparent)]
+diff --git a/drivers/gpu/drm/tyr/gpu.rs b/drivers/gpu/drm/tyr/gpu.rs
+index 9c9f48be1b..a043ced67c 100644
+--- a/drivers/gpu/drm/tyr/gpu.rs
++++ b/drivers/gpu/drm/tyr/gpu.rs
+@@ -141,6 +141,11 @@ pub(crate) fn va_bits(&self) -> u32 {
+     pub(crate) fn pa_bits(&self) -> u32 {
+         (self.mmu_features >> 8) & bits::genmask_u32(0..=7)
+     }
++
++    pub(crate) fn heap_context_stride(&self) -> u32 {
++        let heap_context_size = 32;
++        crate::regs::l2_feature_line_size(self.l2_features).next_multiple_of(heap_context_size)
++    }
+ }
+ 
+ // SAFETY:
+diff --git a/drivers/gpu/drm/tyr/heap.rs b/drivers/gpu/drm/tyr/heap.rs
+new file mode 100644
+index 0000000000..601e344cb8
+--- /dev/null
++++ b/drivers/gpu/drm/tyr/heap.rs
+@@ -0,0 +1,315 @@
++// SPDX-License-Identifier: GPL-2.0 or MIT
++
++//! The heap management implementation.
++//!
++//! Mali GPUs are [tiled
++//! renderers](https://en.wikipedia.org/wiki/Tiled_rendering). This means that
++//! the hardware tiler units do not know upfront how much memory a scene will
++//! take and instead emit OOM events when they run out of memory. The driver is
++//! reponsible for allocating more memory when this happens.
++//!
++//! This file contains the implementations for two driver ioctls:
++//!
++//! - DRM_PANTHOR_HEAP_CREATE: Create a tiler heap.
++//! - DRM_PANTHOR_HEAP_DESTROY: Destroy a tiler heap.
++//!
++//! As well as the logic to dynamically grow the heap on OOM events.
++//!
++
++use core::sync::atomic::AtomicUsize;
++
++use kernel::alloc::KVec;
++use kernel::bits::genmask_u64;
++use kernel::devres::Devres;
++use kernel::io::mem::IoMem;
++use kernel::kvec;
++use kernel::new_mutex;
++use kernel::prelude::*;
++use kernel::sync::Arc;
++use kernel::sync::Mutex;
++use kernel::uapi::SZ_128K;
++use kernel::uapi::SZ_8M;
++use kernel::xarray;
++use kernel::xarray::XArray;
++
++use crate::driver::TyrDevice;
++use crate::gem;
++use crate::mmu::vm::Vm;
++use crate::mmu::vm::WithLockedVm;
++
++const MAX_HEAPS_PER_POOL: u32 = 128;
++const MAX_CONTEXT_SIZE: u32 = 32;
++
++pub(crate) struct ChunkHeader {
++    /// A GPU VA pointing to the next chunk in the list.
++    next: u64,
++
++    /// Other hardware-specific fields. MBZ.
++    unknown: [u32; 14],
++}
++
++impl ChunkHeader {
++    /// Reads a heap chunk header at a given offset.
++    ///
++    /// Note that the area pointed to by `ptr` is shared with the GPU, so we
++    /// cannot simply parse it or cast it to &Self.
++    ///
++    /// Merely taking a reference to it would be UB, as the GPU can change the
++    /// underlying memory at any time, as it is a core running on its own.
++    pub(super) fn read(mem: &mut gem::ObjectRef, offset: usize) -> Result<Self> {
++        if offset > mem.size() {
++            return Err(EINVAL);
++        }
++
++        let vmap = mem.vmap()?;
++        let ptr = unsafe { vmap.as_mut_ptr().add(offset).cast::<Self>() };
++        // SAFETY: we know that this pointer is aligned and valid for reads for
++        // at least size_of::<Self>() bytes.
++        Ok(unsafe { core::ptr::read_volatile(ptr) })
++    }
++
++    /// Writes a heap chunk header at a given offset.
++    ///
++    /// Note that the area pointed to by `ptr` is shared with the GPU, so we
++    /// cannot simply parse it or cast it to &Self.
++    ///
++    /// Merely taking a reference to it would be UB, as the GPU can change the
++    /// underlying memory at any time, as it is a core running on its own.
++    pub(super) fn write(mem: &mut gem::ObjectRef, offset: usize, value: Self) -> Result {
++        if offset > mem.size() {
++            return Err(EINVAL);
++        }
++
++        let vmap = mem.vmap()?;
++        let ptr = unsafe { vmap.as_mut_ptr().add(offset).cast::<Self>() };
++        // SAFETY: we know that this pointer is aligned and valid for writes for
++        // at least size_of::<Self>() bytes.
++        unsafe { core::ptr::write_volatile(ptr, value) };
++
++        Ok(())
++    }
++}
++
++pub(crate) struct ContextCreateArgs {
++    pub(crate) initial_chunk_count: u32,
++    pub(crate) chunk_size: u32,
++    pub(crate) max_chunks: u32,
++    pub(crate) target_in_flight: u32,
++}
++
++pub(crate) struct CreatedContext {
++    pub(crate) context_id: usize,
++    pub(crate) context_gpu_va: u64,
++    pub(crate) first_chunk_gpu_va: u64,
++}
++
++pub(crate) struct ContextGrowArgs {
++    pub(crate) heap_gpu_va: u64,
++    pub(crate) renderpasses_in_flight: u32,
++    pub(crate) pending_frag_count: u32,
++}
++
++pub(crate) struct Context {
++    /// The VM this heap is bound to.
++    vm: Arc<Mutex<Vm>>,
++    chunks: KVec<gem::ObjectRef>,
++    chunk_size: u32,
++    max_chunks: u32,
++    target_in_flight: u32,
++}
++
++impl Context {
++    fn alloc_chunk(&mut self, tdev: &TyrDevice) -> Result {
++        let chunk_bo = {
++            let mut chunk_bo = self.vm.with_lock_taken(|vm| {
++                pr_info!("Allocating heap chunk for context\n");
++                gem::new_kernel_object(
++                    tdev,
++                    tdev.iomem.clone(),
++                    vm,
++                    gem::KernelVaPlacement::Auto {
++                        size: self.chunk_size as usize,
++                    },
++                    crate::mmu::vm::map_flags::NOEXEC.into(),
++                )
++            })?;
++
++            let vmap = chunk_bo.vmap()?;
++            let mem = vmap.as_mut_slice();
++            mem.fill(0);
++
++            chunk_bo
++        };
++
++        // Chain the new chunk to the end of the list.
++        if let Some(last) = self.chunks.last_mut() {
++            let mut last_hdr = ChunkHeader::read(last, 0)?;
++            last_hdr.next = (chunk_bo.kernel_va().ok_or(EINVAL)?.start & genmask_u64(12..=63))
++                | (chunk_bo.size() as u64 >> 12);
++            ChunkHeader::write(last, 0, last_hdr)?;
++        }
++
++        self.chunks.push(chunk_bo, GFP_KERNEL)?;
++        Ok(())
++    }
++}
++
++pub(crate) struct Pool {
++    /// The VM this pool is bound to.
++    vm: Arc<Mutex<Vm>>,
++
++    gpu_contexts: Pin<KBox<Mutex<gem::ObjectRef>>>,
++    pool_total_size: AtomicUsize,
++
++    xa: Pin<KBox<XArray<KBox<Context>>>>,
++    free_index: AtomicUsize,
++}
++
++impl Pool {
++    pub(crate) fn create(
++        tdev: &TyrDevice,
++        iomem: Arc<Devres<IoMem>>,
++        vm: Arc<Mutex<Vm>>,
++    ) -> Result<Self> {
++        let stride = tdev.gpu_info.heap_context_stride();
++
++        let bo_size = MAX_HEAPS_PER_POOL * stride;
++        let bo_size = bo_size.next_multiple_of(4096) as usize;
++
++        let gpu_contexts = vm.with_lock_taken(|vm| {
++            gem::new_kernel_object(
++                tdev,
++                iomem,
++                vm,
++                gem::KernelVaPlacement::Auto { size: bo_size },
++                crate::mmu::vm::map_flags::NOEXEC.into(),
++            )
++        })?;
++
++        let gpu_contexts = KBox::pin_init(new_mutex!(gpu_contexts), GFP_KERNEL)?;
++
++        let pool_total_size = AtomicUsize::new(bo_size);
++
++        let xa = KBox::pin_init(XArray::new(xarray::AllocKind::Alloc1), GFP_KERNEL)?;
++        let free_index = AtomicUsize::new(1);
++
++        Ok(Self {
++            vm,
++            gpu_contexts,
++            pool_total_size,
++            xa,
++            free_index,
++        })
++    }
++
++    pub(crate) fn create_heap_context(
++        &self,
++        tdev: &TyrDevice,
++        mut args: ContextCreateArgs,
++    ) -> Result<CreatedContext> {
++        if args.initial_chunk_count == 0 {
++            return Err(EINVAL);
++        }
++
++        if args.initial_chunk_count > args.max_chunks {
++            return Err(EINVAL);
++        }
++
++        if args.chunk_size != args.chunk_size.next_multiple_of(4096) {
++            return Err(EINVAL);
++        }
++
++        if args.chunk_size < SZ_128K || args.chunk_size > SZ_8M {
++            return Err(EINVAL);
++        }
++
++        // Force 8MB chunks for now, as our TILER_OOM impl does not work.
++        args.chunk_size = SZ_8M;
++
++        let mut heap_ctx = KBox::new(
++            Context {
++                vm: self.vm.clone(),
++                chunks: kvec![],
++                chunk_size: args.chunk_size,
++                max_chunks: args.max_chunks,
++                target_in_flight: 0,
++            },
++            GFP_KERNEL,
++        )?;
++
++        pr_info!("Creating heap context: initial_chunks={}, chunk_size={:#x}, max_chunks={}, target_in_flight={}\n",
++            args.initial_chunk_count,
++            args.chunk_size,
++            args.max_chunks,
++            args.target_in_flight,
++        );
++
++        for _ in 0..args.initial_chunk_count {
++            heap_ctx.alloc_chunk(tdev)?;
++        }
++
++        let first_chunk_gpu_va = heap_ctx
++            .chunks
++            .first()
++            .and_then(|bo| bo.kernel_va())
++            .ok_or(EINVAL)?
++            .start;
++
++        let context_gpu_va = self.gpu_contexts.lock().kernel_va().ok_or(EINVAL)?.start
++            + (self.free_index.load(core::sync::atomic::Ordering::Relaxed) as u64
++                * u64::from(tdev.gpu_info.heap_context_stride()));
++
++        let index = self
++            .free_index
++            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++
++        let xa = self.xa.as_ref();
++        let mut guard = xa.lock();
++        guard
++            .store(index, heap_ctx, GFP_KERNEL)
++            .map_err(|_| EINVAL)?;
++
++        Ok(CreatedContext {
++            context_id: index,
++            context_gpu_va,
++            first_chunk_gpu_va,
++        })
++    }
++
++    pub(crate) fn destroy_heap_context(&self, context_id: usize) -> Option<KBox<Context>> {
++        let xa = self.xa.as_ref();
++        let mut guard = xa.lock();
++        guard.remove(context_id)
++    }
++
++    pub(crate) fn grow_heap_context(
++        &mut self,
++        tdev: &TyrDevice,
++        args: ContextGrowArgs,
++    ) -> Result<u64> {
++        let offset = args.heap_gpu_va - self.gpu_contexts.lock().kernel_va().ok_or(EINVAL)?.start;
++
++        let offset = u32::try_from(offset).map_err(|_| EINVAL)?;
++        let index = offset / tdev.gpu_info.heap_context_stride();
++
++        let xa = self.xa.as_ref();
++        let mut guard = xa.lock();
++        let heap_ctx = guard.get_mut(index as usize).ok_or(EINVAL)?;
++
++        // if args.renderpasses_in_flight > heap_ctx.target_in_flight
++        //     || heap_ctx.chunks.len() >= heap_ctx.max_chunks as usize
++        // {
++        //     return Err(ENOMEM);
++        // }
++
++        heap_ctx.alloc_chunk(tdev)?;
++
++        let chunk_bo = heap_ctx.chunks.last().ok_or(EINVAL)?;
++        let chunk_start = chunk_bo.kernel_va().ok_or(EINVAL)?.start;
++
++        let new_chunk_gpu_va =
++            (chunk_start & genmask_u64(12..=63)) | (chunk_bo.size() as u64 >> 12);
++
++        Ok(new_chunk_gpu_va)
++    }
++}
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index 2d832af39f..bbe9ee317e 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -44,6 +44,7 @@
+ use crate::gem::DriverObject;
+ use crate::gem::KernelVaPlacement;
+ use crate::gpu::GpuInfo;
++use crate::heap;
+ use crate::mmu::Mmu;
+ use crate::regs;
+ 
+diff --git a/drivers/gpu/drm/tyr/regs.rs b/drivers/gpu/drm/tyr/regs.rs
+index db36cfd030..d48f0e0af5 100644
+--- a/drivers/gpu/drm/tyr/regs.rs
++++ b/drivers/gpu/drm/tyr/regs.rs
+@@ -27,6 +27,9 @@ pub(crate) fn write(&self, iomem: &Devres<IoMem>, value: u32) -> Result<()> {
+ 
+ pub(crate) const GPU_ID: Register<0x0> = Register;
+ pub(crate) const GPU_L2_FEATURES: Register<0x4> = Register;
++pub(crate) const fn l2_feature_line_size(l2_features: u32) -> u32 {
++    1 << (l2_features & kernel::bits::genmask_u32(0..=7))
++}
+ pub(crate) const GPU_CORE_FEATURES: Register<0x8> = Register;
+ pub(crate) const GPU_CSF_ID: Register<0x1c> = Register;
+ pub(crate) const GPU_REVID: Register<0x280> = Register;
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index bf45ac759b..b8d2ff5ffa 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -27,6 +27,54 @@
+ use super::syncs;
+ 
+ impl Scheduler {
++    // TODO: this does not work, we need to get the heap pool from the VM
++    // somehow.
++    fn process_tiler_oom(
++        &mut self,
++        csg: &mut CommandStreamGroup,
++        csg_id: u32,
++        cs_id: u32,
++    ) -> Result {
++        let cs = csg.cs_mut(cs_id as usize).ok_or(EINVAL)?;
++        let output = cs.read_output()?;
++
++        let heap_address = output.heap_address;
++        let vt_start = output.heap_vt_start;
++        let vt_end = output.heap_vt_end;
++        let frag_end = output.heap_frag_end;
++
++        let _renderpasses_in_flight = vt_start.wrapping_sub(frag_end);
++        let _pending_frag_count = vt_end.wrapping_sub(frag_end);
++
++        pr_info!(
++            "Tiler OOM: heap_addr={:#x}, vt_start={}, vt_end={}, frag_end={}\n",
++            heap_address,
++            vt_start,
++            vt_end,
++            frag_end
++        );
++
++        let slot = self.csg_slots[csg_id as usize].as_ref().ok_or(EINVAL)?;
++        let _vm = slot.group.vm.clone();
++
++        unimplemented!("We can't get the heap pool from the VM yet");
++
++        // let new_chunk_va = 0u64; // <this needs to come from grow_heap_context()
++
++        // let mut input = cs.read_input()?;
++        // input.heap_start = new_chunk_va;
++        // input.heap_end = new_chunk_va;
++        // cs.write_input(input)?;
++
++        // let req = cs.input_request()?;
++        // req.update_reqs(output.ack, cs::constants::CS_TILER_OOM)?;
++
++        // let doorbell = csg.doorbell_request()?;
++        // doorbell.toggle_reqs(1 << cs_id)?;
++
++        Ok(())
++    }
++
+     pub(crate) fn process_events(&mut self, data: Arc<TyrData>) -> Result {
+         // TODO: we need to annotate this function with the dma signalling token.
+ 
+@@ -154,6 +202,10 @@ fn process_cs_irq(
+             cs.decode_fault()?;
+         }
+ 
++        if cs_events & cs::constants::CS_TILER_OOM != 0 {
++            self.process_tiler_oom(csg, csg_id, cs_id)?;
++        }
++
+         if faulty {
+             // TODO: we cannot sleep in the signalling path.
+             self.csg_slots[csg_id as usize]
+diff --git a/drivers/gpu/drm/tyr/tyr.rs b/drivers/gpu/drm/tyr/tyr.rs
+index e473aaa924..8aa2d20e9b 100644
+--- a/drivers/gpu/drm/tyr/tyr.rs
++++ b/drivers/gpu/drm/tyr/tyr.rs
+@@ -41,6 +41,7 @@
+ mod fw;
+ mod gem;
+ mod gpu;
++mod heap;
+ mod mmu;
+ mod regs;
+ mod sched;
+-- 
+2.51.0
+

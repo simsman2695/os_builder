@@ -1,0 +1,78 @@
+From 0caa41c9690ef437ba8c46f9eaddaa24d3dddb10 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:27 -0400
+Subject: [PATCH 012/161] rust: Add dma_buf stub bindings
+
+In order to implement the gem export callback, we need a type to represent
+struct dma_buf. So - this commit introduces a set of stub bindings for
+dma_buf. These bindings provide a ref-counted DmaBuf object, but don't
+currently implement any functionality for using the DmaBuf.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ rust/kernel/dma_buf.rs | 40 ++++++++++++++++++++++++++++++++++++++++
+ rust/kernel/lib.rs     |  1 +
+ 2 files changed, 41 insertions(+)
+ create mode 100644 rust/kernel/dma_buf.rs
+
+diff --git a/rust/kernel/dma_buf.rs b/rust/kernel/dma_buf.rs
+new file mode 100644
+index 0000000000..a66829afcd
+--- /dev/null
++++ b/rust/kernel/dma_buf.rs
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! DMA buffer API
++//!
++//! C header: [`include/linux/dma-buf.h`](srctree/include/linux/dma-buf.h)
++
++use bindings;
++use kernel::types::*;
++
++/// A DMA buffer object.
++///
++/// # Invariants
++///
++/// The data layout of this type is equivalent to that of `struct dma_buf`.
++#[repr(transparent)]
++pub struct DmaBuf(Opaque<bindings::dma_buf>);
++
++// SAFETY: `struct dma_buf` is thread-safe
++unsafe impl Send for DmaBuf {}
++// SAFETY: `struct dma_buf` is thread-safe
++unsafe impl Sync for DmaBuf {}
++
++#[expect(unused)]
++impl DmaBuf {
++    /// Convert from a `*mut bindings::dma_buf` to a [`DmaBuf`].
++    ///
++    /// # Safety
++    ///
++    /// The caller guarantees that `self_ptr` points to a valid initialized `struct dma_buf` for the
++    /// duration of the lifetime of `'a`, and promises to not violate rust's data aliasing rules
++    /// using the reference provided by this function.
++    pub(crate) unsafe fn from_raw<'a>(self_ptr: *mut bindings::dma_buf) -> &'a Self {
++        // SAFETY: Our data layout is equivalent to `dma_buf` .
++        unsafe { &*self_ptr.cast() }
++    }
++
++    pub(crate) fn as_raw(&self) -> *mut bindings::dma_buf {
++        self.0.get()
++    }
++}
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index ed53169e79..4699dd22db 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -80,6 +80,7 @@
+ pub mod device_id;
+ pub mod devres;
+ pub mod dma;
++pub mod dma_buf;
+ pub mod driver;
+ #[cfg(CONFIG_DRM = "y")]
+ pub mod drm;
+-- 
+2.51.0
+

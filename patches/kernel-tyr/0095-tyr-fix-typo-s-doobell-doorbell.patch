@@ -1,0 +1,93 @@
+From 6f24b4e24c2097b7564253e70ad57889a38b3729 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 8 Jul 2025 12:35:54 -0300
+Subject: [PATCH 095/161] tyr: fix typo: s/doobell/doorbell
+
+The term "doorbell" was misnamed.
+
+Signed-off-by: Daniel Almeida <daniel.almeida@collabora.com>
+---
+ drivers/gpu/drm/tyr/fw.rs            | 2 +-
+ drivers/gpu/drm/tyr/fw/global.rs     | 4 ++--
+ drivers/gpu/drm/tyr/fw/global/csg.rs | 2 +-
+ drivers/gpu/drm/tyr/sched.rs         | 2 +-
+ drivers/gpu/drm/tyr/sched/events.rs  | 2 +-
+ 5 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/fw.rs b/drivers/gpu/drm/tyr/fw.rs
+index 242f765514..88a862170e 100644
+--- a/drivers/gpu/drm/tyr/fw.rs
++++ b/drivers/gpu/drm/tyr/fw.rs
+@@ -365,7 +365,7 @@ pub(crate) trait SharedSectionEntry {
+ 
+     fn input_request(&self) -> Result<RequestField>;
+ 
+-    fn doobell_request(&self) -> Result<RequestField> {
++    fn doorbell_request(&self) -> Result<RequestField> {
+         pr_err!("Doorbell request not supported for this interface");
+         Err(ENOTSUPP)
+     }
+diff --git a/drivers/gpu/drm/tyr/fw/global.rs b/drivers/gpu/drm/tyr/fw/global.rs
+index 8cf1da00d0..f5d015177b 100644
+--- a/drivers/gpu/drm/tyr/fw/global.rs
++++ b/drivers/gpu/drm/tyr/fw/global.rs
+@@ -477,7 +477,7 @@ pub(crate) fn set_csg_state(
+     /// Ring the CSG doorbell, thereby instructing CSF to process the requests
+     /// made on this CSG.
+     pub(crate) fn ring_csg_doorbell(&mut self, csg_idx: usize) -> Result {
+-        self.doobell_request()?.toggle_reqs(1 << csg_idx)?;
++        self.doorbell_request()?.toggle_reqs(1 << csg_idx)?;
+ 
+         self.ring_glb_doorbell()?;
+ 
+@@ -577,7 +577,7 @@ fn input_request(&self) -> Result<RequestField> {
+         ))
+     }
+ 
+-    fn doobell_request(&self) -> Result<RequestField> {
++    fn doorbell_request(&self) -> Result<RequestField> {
+         let glb = self.state.enabled()?;
+ 
+         Ok(RequestField::new(
+diff --git a/drivers/gpu/drm/tyr/fw/global/csg.rs b/drivers/gpu/drm/tyr/fw/global/csg.rs
+index 5269709178..3ce6a49569 100644
+--- a/drivers/gpu/drm/tyr/fw/global/csg.rs
++++ b/drivers/gpu/drm/tyr/fw/global/csg.rs
+@@ -225,7 +225,7 @@ fn input_request(&self) -> Result<RequestField> {
+         ))
+     }
+ 
+-    fn doobell_request(&self) -> Result<RequestField> {
++    fn doorbell_request(&self) -> Result<RequestField> {
+         Ok(RequestField::new(
+             &self.input_area,
+             core::mem::offset_of!(Input, doorbell_req),
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index da6d12e26c..a25eb3bbf4 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -308,7 +308,7 @@ pub(crate) fn program_csg_slot(
+             let csg_iface = glb_iface.csg_mut(csg_idx).ok_or(EINVAL)?;
+             csg_iface.write_input(input)?;
+ 
+-            let db_req = csg_iface.doobell_request()?;
++            let db_req = csg_iface.doorbell_request()?;
+             db_req.toggle_reqs(queue_mask)?;
+ 
+             glb_iface.set_csg_state(csg_idx, csg::GroupState::Start)?;
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index 9f1b700306..1a9eecb041 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -104,7 +104,7 @@ fn process_csg_irq(
+         }
+ 
+         if ring_cs_db_mask != 0 {
+-            let req = csg.doobell_request()?;
++            let req = csg.doorbell_request()?;
+             req.toggle_reqs(ring_cs_db_mask)?;
+         }
+ 
+-- 
+2.51.0
+

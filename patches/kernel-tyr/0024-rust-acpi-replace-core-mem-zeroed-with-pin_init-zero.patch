@@ -1,0 +1,35 @@
+From 8ff3ee79bc54b447674e9cd85758b1ee21be67d2 Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:37 +0200
+Subject: [PATCH 024/161] rust: acpi: replace `core::mem::zeroed` with
+ `pin_init::zeroed`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/acpi.rs | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/rust/kernel/acpi.rs b/rust/kernel/acpi.rs
+index 7ae317368b..f9488be924 100644
+--- a/rust/kernel/acpi.rs
++++ b/rust/kernel/acpi.rs
+@@ -42,9 +42,7 @@ pub const fn new(id: &'static CStr) -> Self {
+             "ID exceeds 16 bytes"
+         );
+         let src = id.as_bytes_with_nul();
+-        // Replace with `bindings::acpi_device_id::default()` once stabilized for `const`.
+-        // SAFETY: FFI type is valid to be zero-initialized.
+-        let mut acpi: bindings::acpi_device_id = unsafe { core::mem::zeroed() };
++        let mut acpi: bindings::acpi_device_id = pin_init::zeroed();
+         let mut i = 0;
+         while i < src.len() {
+             acpi.id[i] = src[i];
+-- 
+2.51.0
+

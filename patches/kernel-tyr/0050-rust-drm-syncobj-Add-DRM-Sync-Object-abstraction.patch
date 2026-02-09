@@ -1,0 +1,184 @@
+From 72e19e5398f4b5253ffe80db5b7fc831ed05bb9b Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sat, 11 Feb 2023 16:59:20 +0900
+Subject: [PATCH 050/161] rust: drm: syncobj: Add DRM Sync Object abstraction
+
+DRM Sync Objects are a container for a DMA fence, and can be waited on
+signaled, exported, and imported from userspace. Add a Rust abstraction
+so Rust DRM drivers can support this functionality.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+---
+ rust/bindings/bindings_helper.h |  1 +
+ rust/helpers/drm_syncobj.c      | 22 ++++++++
+ rust/helpers/helpers.c          |  1 +
+ rust/kernel/drm/mod.rs          |  1 +
+ rust/kernel/drm/syncobj.rs      | 91 +++++++++++++++++++++++++++++++++
+ 5 files changed, 116 insertions(+)
+ create mode 100644 rust/helpers/drm_syncobj.c
+ create mode 100644 rust/kernel/drm/syncobj.rs
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index 39432193ae..16e2bea28f 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -36,6 +36,7 @@
+ #include <drm/drm_gem_shmem_helper.h>
+ #include <drm/drm_gpuvm.h>
+ #include <drm/drm_ioctl.h>
++#include <drm/drm_syncobj.h>
+ #include <kunit/test.h>
+ #include <linux/auxiliary_bus.h>
+ #include <linux/blk-mq.h>
+diff --git a/rust/helpers/drm_syncobj.c b/rust/helpers/drm_syncobj.c
+new file mode 100644
+index 0000000000..9e14c989ed
+--- /dev/null
++++ b/rust/helpers/drm_syncobj.c
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <drm/drm_syncobj.h>
++
++#ifdef CONFIG_DRM
++
++void rust_helper_drm_syncobj_get(struct drm_syncobj *obj)
++{
++	drm_syncobj_get(obj);
++}
++
++void rust_helper_drm_syncobj_put(struct drm_syncobj *obj)
++{
++	drm_syncobj_put(obj);
++}
++
++struct dma_fence *rust_helper_drm_syncobj_fence_get(struct drm_syncobj *syncobj)
++{
++	return drm_syncobj_fence_get(syncobj);
++}
++
++#endif
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index f3dbd194e3..747d9f88d5 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -24,6 +24,7 @@
+ #include "dma-fence.c"
+ #include "drm.c"
+ #include "drm_gpuvm.c"
++#include "drm_syncobj.c"
+ #include "err.c"
+ #include "irq.c"
+ #include "fs.c"
+diff --git a/rust/kernel/drm/mod.rs b/rust/kernel/drm/mod.rs
+index ccd2941b9e..295d413a3c 100644
+--- a/rust/kernel/drm/mod.rs
++++ b/rust/kernel/drm/mod.rs
+@@ -10,6 +10,7 @@
+ pub mod gpuvm;
+ pub mod ioctl;
+ pub mod mm;
++pub mod syncobj;
+ 
+ pub use self::device::Device;
+ pub use self::driver::Driver;
+diff --git a/rust/kernel/drm/syncobj.rs b/rust/kernel/drm/syncobj.rs
+new file mode 100644
+index 0000000000..734d200ae3
+--- /dev/null
++++ b/rust/kernel/drm/syncobj.rs
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0 OR MIT
++
++//! DRM Sync Objects
++//!
++//! C header: [`include/drm/drm_syncobj.h`](../../../../include/drm/drm_syncobj.h)
++
++use core::marker::PhantomData;
++
++use crate::{bindings, dma_fence::*, drm, error::Result, prelude::*};
++
++use super::Driver;
++
++/// A DRM Sync Object
++///
++/// # Invariants
++/// ptr is a valid pointer to a drm_syncobj and we own a reference to it.
++pub struct SyncObj<T: Driver> {
++    ptr: *mut bindings::drm_syncobj,
++    phantom: PhantomData<T>,
++}
++
++impl<T: drm::Driver> SyncObj<T> {
++    /// Looks up a sync object by its handle for a given `File`.
++    pub fn lookup_handle(file: &drm::File<T::File>, handle: u32) -> Result<SyncObj<T>> {
++        // SAFETY: The arguments are all valid per the type invariants.
++        let ptr = unsafe { bindings::drm_syncobj_find(file.as_raw() as *mut _, handle) };
++
++        if ptr.is_null() {
++            Err(ENOENT)
++        } else {
++            Ok(SyncObj {
++                ptr,
++                phantom: PhantomData,
++            })
++        }
++    }
++
++    /// Returns the DMA fence associated with this sync object, if any.
++    pub fn fence_get(&self) -> Option<Fence> {
++        // SAFETY: self.ptr is always valid
++        let fence = unsafe { bindings::drm_syncobj_fence_get(self.ptr) };
++        if fence.is_null() {
++            None
++        } else {
++            // SAFETY: The pointer is non-NULL and drm_syncobj_fence_get acquired an
++            // additional reference.
++            Some(unsafe { Fence::from_raw(fence) })
++        }
++    }
++
++    /// Replaces the DMA fence with a new one, or removes it if fence is None.
++    pub fn replace_fence(&self, fence: Option<&Fence>) {
++        // SAFETY: All arguments should be valid per the respective type invariants.
++        unsafe {
++            bindings::drm_syncobj_replace_fence(
++                self.ptr,
++                fence.map_or(core::ptr::null_mut(), |a| a.raw()),
++            )
++        };
++    }
++
++    /// Adds a new timeline point to the syncobj.
++    pub fn add_point(&self, chain: FenceChain, fence: &Fence, point: u64) {
++        // SAFETY: All arguments should be valid per the respective type invariants.
++        // This takes over the FenceChain ownership.
++        unsafe { bindings::drm_syncobj_add_point(self.ptr, chain.into_raw(), fence.raw(), point) };
++    }
++}
++
++impl<T: Driver> Drop for SyncObj<T> {
++    fn drop(&mut self) {
++        // SAFETY: We own a reference to this syncobj.
++        unsafe { bindings::drm_syncobj_put(self.ptr) };
++    }
++}
++
++impl<T: Driver> Clone for SyncObj<T> {
++    fn clone(&self) -> Self {
++        // SAFETY: `ptr` is valid per the type invariant and we own a reference to it.
++        unsafe { bindings::drm_syncobj_get(self.ptr) };
++        SyncObj {
++            ptr: self.ptr,
++            phantom: PhantomData,
++        }
++    }
++}
++
++// SAFETY: drm_syncobj operations are internally locked.
++unsafe impl<T: Driver> Sync for SyncObj<T> {}
++// SAFETY: drm_syncobj operations are internally locked.
++unsafe impl<T: Driver> Send for SyncObj<T> {}
+-- 
+2.51.0
+

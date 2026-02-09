@@ -1,0 +1,40 @@
+From 8517002d4d8c4ff34a7ce2431e24bb0eab054c79 Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Mon, 25 Aug 2025 15:24:44 +0200
+Subject: [PATCH 081/161] MAINTAINERS: rust: dma: add scatterlist files
+
+Rename the "DMA MAPPING HELPERS DEVICE DRIVER API [RUST]" maintainers
+entry to "DMA MAPPING & SCATTERLIST API [RUST]" and add the
+corresponding scatterlist files.
+
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ MAINTAINERS | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 5877bf6e95..5c1bf8146f 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -7240,7 +7240,7 @@ F:	include/linux/dma-mapping.h
+ F:	include/linux/swiotlb.h
+ F:	kernel/dma/
+ 
+-DMA MAPPING HELPERS DEVICE DRIVER API [RUST]
++DMA MAPPING & SCATTERLIST API [RUST]
+ M:	Abdiel Janulgue <abdiel.janulgue@gmail.com>
+ M:	Danilo Krummrich <dakr@kernel.org>
+ R:	Daniel Almeida <daniel.almeida@collabora.com>
+@@ -7251,7 +7251,9 @@ S:	Supported
+ W:	https://rust-for-linux.com
+ T:	git https://github.com/Rust-for-Linux/linux.git alloc-next
+ F:	rust/helpers/dma.c
++F:	rust/helpers/scatterlist.c
+ F:	rust/kernel/dma.rs
++F:	rust/kernel/scatterlist.rs
+ F:	samples/rust/rust_dma.rs
+ 
+ DMA-BUF HEAPS FRAMEWORK
+-- 
+2.51.0
+

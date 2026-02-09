@@ -1,0 +1,33 @@
+From b161b4b7857cecfe400e4d468e8d705842dab547 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Fri, 24 Oct 2025 16:33:44 -0300
+Subject: [PATCH 139/161] rust: virt: add pgoff accessor
+
+---
+ rust/kernel/mm/virt.rs | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/rust/kernel/mm/virt.rs b/rust/kernel/mm/virt.rs
+index 6086ca981b..dc19aa6fc9 100644
+--- a/rust/kernel/mm/virt.rs
++++ b/rust/kernel/mm/virt.rs
+@@ -92,6 +92,16 @@ pub fn end(&self) -> usize {
+         unsafe { (*self.as_ptr()).__bindgen_anon_1.__bindgen_anon_1.vm_end }
+     }
+ 
++    /// Returns the page offset of the virtual memory area.
++    ///
++    /// This is the offset in pages from the start of the file being mapped.
++    #[inline]
++    pub fn pgoff(&self) -> usize {
++        // SAFETY: By the type invariants, the caller holds at least the mmap read lock, so this
++        // access is not a data race.
++        unsafe { (*self.as_ptr()).vm_pgoff }
++    }
++
+     /// Zap pages in the given page range.
+     ///
+     /// This clears page table mappings for the range at the leaf level, leaving all other page
+-- 
+2.51.0
+

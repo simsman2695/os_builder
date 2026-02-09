@@ -1,0 +1,56 @@
+From e777fc23b9727343ff7a11f5002bd3b485795404 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 17 Nov 2025 09:51:34 -0300
+Subject: [PATCH 152/161] tyr: mmap: call pgprot_noncached
+
+This will not work otherwise.
+---
+ drivers/gpu/drm/tyr/mmap.rs | 2 +-
+ rust/helpers/helpers.c      | 1 +
+ rust/helpers/pgtable.c      | 8 ++++++++
+ 3 files changed, 10 insertions(+), 1 deletion(-)
+ create mode 100644 rust/helpers/pgtable.c
+
+diff --git a/drivers/gpu/drm/tyr/mmap.rs b/drivers/gpu/drm/tyr/mmap.rs
+index 61216b4dc7..395b7898f9 100644
+--- a/drivers/gpu/drm/tyr/mmap.rs
++++ b/drivers/gpu/drm/tyr/mmap.rs
+@@ -83,7 +83,7 @@ pub(crate) fn mmap(device: &TyrDevice, _file: &crate::file::File, vma: &VmaNew)
+     let phys_addr = tdev.mmio_phys_addr + CSF_GPU_LATEST_FLUSH_ID as u64;
+     let pfn = (phys_addr >> PAGE_SHIFT) as usize;
+ 
+-    let pgprot = unsafe { (*vma).vm_page_prot };
++    let pgprot = unsafe { bindings::pgprot_noncached((*vma).vm_page_prot) };
+ 
+     let ret = unsafe { bindings::vmf_insert_pfn_prot(vma, address, pfn, pgprot) };
+ 
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index cedd22b2d8..151fe0f4b8 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -39,6 +39,7 @@
+ #include "mutex.c"
+ #include "of.c"
+ #include "page.c"
++#include "pgtable.c"
+ #include "pci.c"
+ #include "pid_namespace.c"
+ #include "platform.c"
+diff --git a/rust/helpers/pgtable.c b/rust/helpers/pgtable.c
+new file mode 100644
+index 0000000000..014aa4e0cf
+--- /dev/null
++++ b/rust/helpers/pgtable.c
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/pgtable.h>
++
++pgprot_t rust_helper_pgprot_noncached(pgprot_t prot)
++{
++	return pgprot_noncached(prot);
++}
+\ No newline at end of file
+-- 
+2.51.0
+

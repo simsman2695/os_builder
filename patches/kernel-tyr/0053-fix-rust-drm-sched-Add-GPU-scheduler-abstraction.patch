@@ -1,0 +1,45 @@
+From 0327fa611d31e789091fe0e0636e3800b42ae74e Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Mon, 1 Sep 2025 13:35:38 +0200
+Subject: [PATCH 053/161] fix: rust: drm: sched: Add GPU scheduler abstraction
+
+Add support for client id as per:
+    2956554823ce ("drm/sched: Store the drm client_id in drm_sched_fence")
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/kernel/drm/sched.rs | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/sched.rs b/rust/kernel/drm/sched.rs
+index 4caa55f4f1..2318019f72 100644
+--- a/rust/kernel/drm/sched.rs
++++ b/rust/kernel/drm/sched.rs
+@@ -278,7 +278,7 @@ pub fn new(sched: &Scheduler<T>, priority: Priority) -> Result<Self> {
+     /// after which the scheduler owns it. Since jobs must be submitted in creation order,
+     /// this requires a mutable reference to the entity, ensuring that only one new job can be
+     /// in flight at once.
+-    pub fn new_job(&mut self, credits: u32, inner: T) -> Result<PendingJob<'_, T>> {
++    pub fn new_job(&mut self, credits: u32, client_id: u64, inner: T) -> Result<PendingJob<'_, T>> {
+         let mut job: KBox<MaybeUninit<Job<T>>> = Box::new_uninit(GFP_KERNEL | __GFP_ZERO)?;
+ 
+         // SAFETY: We hold a reference to the entity (which is a valid pointer),
+@@ -289,6 +289,7 @@ pub fn new_job(&mut self, credits: u32, inner: T) -> Result<PendingJob<'_, T>> {
+                 &self.0.as_ref().get_ref().entity as *const _ as *mut _,
+                 credits,
+                 core::ptr::null_mut(),
++                client_id,
+             )
+         })?;
+ 
+@@ -328,6 +329,7 @@ impl<T: JobImpl> Scheduler<T> {
+         run_job: Some(run_job_cb::<T>),
+         timedout_job: Some(timedout_job_cb::<T>),
+         free_job: Some(free_job_cb::<T>),
++        cancel_job: None,
+     };
+     /// Creates a new DRM Scheduler object
+     // TODO: Shared timeout workqueues & scores
+-- 
+2.51.0
+

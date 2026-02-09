@@ -1,0 +1,45 @@
+From 323754febc9215b5b16e4534075b65bd306d37a6 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 11:34:54 -0300
+Subject: [PATCH 133/161] tyr: don't mark groups as idle for now
+
+This actually does not work, since it doesn't properly handle
+CS_EXTRACT_INIT, which makes the GPU re-execute the ringbuf from the
+start whenever we reschedule the group and make it active.
+
+Additionally, we shouldn't really evict idle groups if there's nothing
+to schedule in their place anyways.
+
+Disable this behavior while we don't properly fix it.
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index dbf2ea6c6e..6675446090 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -290,9 +290,17 @@ fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+             Ok(())
+         })?;
+ 
+-        if no_in_flight_jobs {
+-            self.mark_group_idle(group, data, csg_id)?;
+-        }
++        // TODO: we need to restore CS_EXTRACT when restarting groups, or else
++        // this will re-execute the whole ringbuffer from the start.
++        //
++        // TODO: We should not remove IDLE groups if there's nothing to
++        // schedule, as it's actually counter-productive to do so.
++        //
++        // For now, just disable this.
++        //
++        // if no_in_flight_jobs {
++        //     self.mark_group_idle(group, data, csg_id)?;
++        // }
+ 
+         Ok(())
+     }
+-- 
+2.51.0
+

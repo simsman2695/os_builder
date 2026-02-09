@@ -1,0 +1,28 @@
+From 7eece72c616aac992d0cc2e5cdc81497fc6a4ac0 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 8 Jul 2025 12:43:44 -0300
+Subject: [PATCH 096/161] tyr: advertise the name 'panthor'
+
+We need to do this if we want to retain drop-in compatibility with
+panvk. This is also needed to make our IGT code recognize tyr as a valid
+implementation of the panthor uAPI.
+---
+ drivers/gpu/drm/tyr/driver.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/driver.rs b/drivers/gpu/drm/tyr/driver.rs
+index 3eda6013cd..1ed8293a02 100644
+--- a/drivers/gpu/drm/tyr/driver.rs
++++ b/drivers/gpu/drm/tyr/driver.rs
+@@ -354,7 +354,7 @@ fn drop(self: Pin<&mut Self>) {
+     major: 0,
+     minor: 0,
+     patchlevel: 0,
+-    name: c_str!("tyr"),
++    name: c_str!("panthor"),
+     desc: c_str!("ARM Mali CSF-based GPU driver"),
+ };
+ 
+-- 
+2.51.0
+

@@ -1,0 +1,80 @@
+From 566dc60f9cb79ff175b73d21325258543da3ac42 Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Tue, 29 Jul 2025 09:34:52 +0000
+Subject: [PATCH 102/161] rust: maple_tree: fix
+
+The tree currently doesn't have commit 12717ebeffcf ("rust: types: add
+FOREIGN_ALIGN to ForeignOwnable"), so fix the resulting conflict. When
+rebasing to a tree including that commit, remove this fix.
+
+Also add missing Send/Sync impls.
+
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ rust/kernel/maple_tree.rs | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/rust/kernel/maple_tree.rs b/rust/kernel/maple_tree.rs
+index 8c025d2c39..4b69a3223a 100644
+--- a/rust/kernel/maple_tree.rs
++++ b/rust/kernel/maple_tree.rs
+@@ -32,6 +32,11 @@ pub struct MapleTree<T: ForeignOwnable> {
+     _p: PhantomData<T>,
+ }
+ 
++// SAFETY: TODO
++unsafe impl<T: Send + Sync + ForeignOwnable> Send for MapleTree<T> {}
++// SAFETY: TODO
++unsafe impl<T: Send + Sync + ForeignOwnable> Sync for MapleTree<T> {}
++
+ /// A maple tree with `MT_FLAGS_ALLOC_RANGE` set.
+ ///
+ /// All methods on [`MapleTree`] are also accessible on this type.
+@@ -171,7 +176,7 @@ pub fn insert_range<R>(&self, range: R, value: T, gfp: Flags) -> Result<(), Inse
+ 
+         // SAFETY: The tree is valid, and we are passing a pointer to an owned instance of `T`.
+         let res = to_result(unsafe {
+-            bindings::mtree_insert_range(self.tree.get(), first, last, ptr, gfp.as_raw())
++            bindings::mtree_insert_range(self.tree.get(), first, last, ptr.cast(), gfp.as_raw())
+         });
+ 
+         if let Err(err) = res {
+@@ -223,7 +228,7 @@ pub fn erase(&self, index: usize) -> Option<T> {
+ 
+         // SAFETY: If the pointer is not null, then we took ownership of a valid instance of `T`
+         // from the tree.
+-        unsafe { T::try_from_foreign(ret) }
++        unsafe { T::try_from_foreign(ret.cast()) }
+     }
+ 
+     /// Lock the internal spinlock.
+@@ -264,7 +269,7 @@ unsafe fn free_all_entries(self: Pin<&mut Self>) {
+             // SAFETY: By the type invariants, this pointer references a valid value of type `T`.
+             // By the safety requirements, it is okay to free it without removing it from the maple
+             // tree.
+-            unsafe { drop(T::from_foreign(ptr)) };
++            unsafe { drop(T::from_foreign(ptr.cast())) };
+         }
+     }
+ }
+@@ -358,7 +363,7 @@ pub fn load(&mut self, index: usize) -> Option<T::BorrowedMut<'_>> {
+         // SAFETY: If the pointer is not null, then it references a valid instance of `T`. It is
+         // safe to borrow the instance mutably because the signature of this function enforces that
+         // the mutable borrow is not used after the spinlock is dropped.
+-        Some(unsafe { T::borrow_mut(ret) })
++        Some(unsafe { T::borrow_mut(ret.cast()) })
+     }
+ }
+ 
+@@ -437,7 +442,7 @@ pub fn alloc_range<R>(
+             bindings::mtree_alloc_range(
+                 self.tree.tree.get(),
+                 &mut index,
+-                ptr,
++                ptr.cast(),
+                 size,
+                 min,
+                 max,
+-- 
+2.51.0
+

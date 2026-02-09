@@ -1,0 +1,43 @@
+From f202f212d954f527e790b42c132ea5a8e4a42983 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Thu, 26 Jun 2025 09:39:13 -0300
+Subject: [PATCH 082/161] HACK: rust: drm: add FEAT_SYNCOBJ
+
+Sadly drivers cannot tell the drm layer the features they support. This
+was apparently removed in favor of something more complex, where you'd
+have to implement traits instead of merely saying "I support drm feature
+X". Anyway, there is no trait saying "we support syncobjs", so just
+hack this feature at the drm level for now.
+---
+ rust/kernel/drm/device.rs | 2 +-
+ rust/kernel/drm/driver.rs | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index 05ed02c992..4ba56bfa29 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -88,7 +88,7 @@ impl<T: drm::Driver> Device<T> {
+         name: T::INFO.name.as_char_ptr().cast_mut(),
+         desc: T::INFO.desc.as_char_ptr().cast_mut(),
+ 
+-        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA,
++        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA | drm::driver::FEAT_SYNCOBJ,
+         ioctls: T::IOCTLS.as_ptr(),
+         num_ioctls: T::IOCTLS.len() as i32,
+         fops: &Self::GEM_FOPS,
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index 23dd7ae1de..917fa01852 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -15,6 +15,7 @@
+ /// Driver use the GEM memory manager. This should be set for all modern drivers.
+ pub(crate) const FEAT_GEM: u32 = bindings::drm_driver_feature_DRIVER_GEM;
+ pub(crate) const FEAT_GEM_GPUVA: u32 = bindings::drm_driver_feature_DRIVER_GEM_GPUVA;
++pub(crate) const FEAT_SYNCOBJ: u32 = bindings::drm_driver_feature_DRIVER_SYNCOBJ;
+ 
+ /// Information data for a DRM Driver.
+ pub struct DriverInfo {
+-- 
+2.51.0
+

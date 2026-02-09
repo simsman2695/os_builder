@@ -55,6 +55,21 @@ log_info "pyelftools found."
 log_info "All required host tools found."
 log_info "Using qemu: ${QEMU_AARCH64}"
 
+# ── Rust/LLVM toolchain (required for --tyr / Rust kernel builds) ────────────
+if [[ "${USE_TYR:-false}" == "true" || "${KERNEL_LLVM:-}" == "1" ]]; then
+    rust_missing=()
+    for cmd in rustc bindgen clang lld; do
+        command -v "$cmd" &>/dev/null || rust_missing+=("$cmd")
+    done
+    if (( ${#rust_missing[@]} )); then
+        log_error "Rust/LLVM tools missing for --tyr build: ${rust_missing[*]}"
+        log_info  "Install: rustup component add rust-src && cargo install bindgen-cli"
+        log_info  "         sudo apt install clang lld llvm"
+        exit 1
+    fi
+    log_info "Rust/LLVM toolchain found for Tyr kernel build."
+fi
+
 # ── kernel source ────────────────────────────────────────────────────────────
 if [[ ! -d "${KERNEL_SRC}/Makefile" && ! -f "${KERNEL_SRC}/Makefile" ]]; then
     if [[ ! -f "${KERNEL_SRC}/Makefile" ]]; then

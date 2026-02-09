@@ -1,0 +1,35 @@
+From 59c923dfd9a4071e4405ff54e4a8df37fc75c179 Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Wed, 20 Aug 2025 16:53:42 +0200
+Subject: [PATCH 075/161] rust: alloc: layout: implement ArrayLayout::size()
+
+Provide a convenience method for ArrayLayout to calculate the size of
+the ArrayLayout in bytes.
+
+Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+Tested-by: Alexandre Courbot <acourbot@nvidia.com>
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/alloc/layout.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/rust/kernel/alloc/layout.rs b/rust/kernel/alloc/layout.rs
+index 93ed514f7c..666accb785 100644
+--- a/rust/kernel/alloc/layout.rs
++++ b/rust/kernel/alloc/layout.rs
+@@ -98,6 +98,11 @@ pub const fn len(&self) -> usize {
+     pub const fn is_empty(&self) -> bool {
+         self.len == 0
+     }
++
++    /// Returns the size of the [`ArrayLayout`] in bytes.
++    pub const fn size(&self) -> usize {
++        self.len() * core::mem::size_of::<T>()
++    }
+ }
+ 
+ impl<T> From<ArrayLayout<T>> for Layout {
+-- 
+2.51.0
+

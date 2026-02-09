@@ -1,0 +1,27 @@
+From af8a4a190110dbc3d40d843d99da3430ddaa6bab Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 18:31:20 -0300
+Subject: [PATCH 141/161] tyr: remove trace in submit path
+
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index c870d0296e..db5913c5b4 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -275,10 +275,6 @@ fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+                         return true;
+                     }
+ 
+-                    // Add this debug aid for a while. It will be important
+-                    // while we develop the driver.
+-                    pr_info!("Signalling fence: {}\n", fence.seqno());
+-
+                     res = fence.signal();
+                     false
+                 });
+-- 
+2.51.0
+

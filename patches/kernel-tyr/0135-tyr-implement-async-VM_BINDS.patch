@@ -1,0 +1,520 @@
+From 32a8086e0588d8c5b357ec01f8aaffec6954e1dc Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Fri, 24 Oct 2025 13:13:11 -0300
+Subject: [PATCH 135/161] tyr: implement async VM_BINDS
+
+We need to be able to handle async VM_BINDS if we want to run on
+upstream mesa. Just add a scheduler to our VMs in order to execute jobs.
+---
+ drivers/gpu/drm/tyr/file.rs            | 146 ++++++++++++++++++++++++-
+ drivers/gpu/drm/tyr/fw.rs              |   1 +
+ drivers/gpu/drm/tyr/mmu.rs             |   3 +-
+ drivers/gpu/drm/tyr/mmu/vm.rs          |  31 ++++++
+ drivers/gpu/drm/tyr/mmu/vm/bind_job.rs |  74 +++++++++++++
+ drivers/gpu/drm/tyr/mmu/vm/pool.rs     |   1 +
+ drivers/gpu/drm/tyr/sched/deps.rs      |  74 ++++++++++++-
+ 7 files changed, 322 insertions(+), 8 deletions(-)
+ create mode 100644 drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 3c827de506..f1f612aac3 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -25,6 +25,9 @@
+ use crate::mmu::vm::pool::Pool;
+ use crate::mmu::vm::VmLayout;
+ use crate::mmu::vm::VmUserSize;
++use crate::mmu::vm::WithLockedVm;
++use crate::mmu::vm::{VmBindJob, VmOperation};
++use crate::sched::deps;
+ use crate::sched::group;
+ 
+ #[pin_data]
+@@ -121,14 +124,153 @@ pub(crate) fn vm_destroy(
+         Ok(0)
+     }
+ 
++    pub(crate) fn vm_bind_async(
++        tdev: &TyrDevice,
++        vmbind: &mut uapi::drm_panthor_vm_bind,
++        file: &DrmFile,
++    ) -> Result<u32> {
++        if vmbind.ops.stride as usize != core::mem::size_of::<uapi::drm_panthor_vm_bind_op>() {
++            dev_info!(
++                tdev.as_ref(),
++                "We cannot graciously handle stride mismatches yet"
++            );
++            return Err(ENOTSUPP);
++        }
++
++        let vm = file
++            .inner()
++            .vm_pool()
++            .get_vm(vmbind.vm_id as usize)
++            .ok_or(EINVAL)?;
++
++        if vm.lock().unusable {
++            return Err(EINVAL);
++        }
++
++        let stride = vmbind.ops.stride as usize;
++        let count = vmbind.ops.count as usize;
++
++        let mut reader = UserSlice::new(
++            UserPtr::from_addr(vmbind.ops.array as usize),
++            stride * count,
++        )
++        .reader();
++
++        let mut ctx = deps::Context::new(file);
++
++        for i in 0..count {
++            let op: VmBindOp = reader.read()?;
++            let mask = uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_TYPE_MASK;
++
++            let vm_operation = match op.0.flags as i32 & mask {
++                uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_TYPE_MAP => {
++                    let bo = gem::lookup_handle(file, op.0.bo_handle)?;
++                    let va_range = op.0.va..op.0.va + op.0.size;
++                    let flags = vm::map_flags::Flags::try_from(op.0.flags & 0b111)?;
++
++                    VmOperation::Map {
++                        va_range,
++                        bo,
++                        bo_offset: op.0.bo_offset,
++                        flags,
++                    }
++                }
++
++                uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_TYPE_UNMAP => {
++                    if op.0.bo_handle != 0 || op.0.bo_offset != 0 {
++                        vmbind.ops.count = i as u32;
++                        return Err(EINVAL);
++                    }
++
++                    let va_range = op.0.va..op.0.va + op.0.size;
++                    VmOperation::Unmap { va_range }
++                }
++
++                _ => {
++                    vmbind.ops.count = i as u32;
++                    return Err(ENOTSUPP);
++                }
++            };
++
++            if op.0.syncs.stride as usize != core::mem::size_of::<uapi::drm_panthor_sync_op>() {
++                dev_info!(
++                    tdev.as_ref(),
++                    "We cannot graciously handle sync stride mismatches yet"
++                );
++                vmbind.ops.count = i as u32;
++                return Err(ENOTSUPP);
++            }
++
++            let sync_count = op.0.syncs.count as usize;
++            let sync_stride = op.0.syncs.stride as usize;
++
++            let mut sync_reader = UserSlice::new(
++                UserPtr::from_addr(op.0.syncs.array as usize),
++                sync_stride * sync_count,
++            )
++            .reader();
++
++            let mut sync_ops = kvec![];
++            for _ in 0..sync_count {
++                let sync_op_uapi: SyncOp = sync_reader.read()?;
++                sync_ops.push(sync_op_uapi, GFP_KERNEL)?;
++            }
++
++            // Convert UAPI sync operations to internal representation
++            let internal_syncs = deps::SyncOp::from_uapi_slice(&sync_ops)?;
++
++            let job = VmBindJob::new(vm.clone(), vm_operation);
++
++            ctx.add_vm_bind_job(job, internal_syncs)?;
++        }
++
++        // Collect all signal operations across all jobs
++        // We need to iterate through all sync ops again to collect signals
++        let mut reader = UserSlice::new(
++            UserPtr::from_addr(vmbind.ops.array as usize),
++            stride * count,
++        )
++        .reader();
++
++        for _ in 0..count {
++            let op: VmBindOp = reader.read()?;
++
++            let sync_count = op.0.syncs.count as usize;
++            let sync_stride = op.0.syncs.stride as usize;
++
++            let mut sync_reader = UserSlice::new(
++                UserPtr::from_addr(op.0.syncs.array as usize),
++                sync_stride * sync_count,
++            )
++            .reader();
++
++            let mut sync_ops = kvec![];
++            for _ in 0..sync_count {
++                let sync_op_uapi: SyncOp = sync_reader.read()?;
++                sync_ops.push(sync_op_uapi, GFP_KERNEL)?;
++            }
++
++            let internal_syncs = deps::SyncOp::from_uapi_slice(&sync_ops)?;
++            ctx.collect_signal_ops(&internal_syncs)?;
++        }
++
++        // Push all VM bind jobs with dependencies
++        vm.with_lock_taken(|vm| {
++            ctx.add_deps_and_push_vm_bind_jobs(&mut vm.entity)?;
++
++            // Push all signal fences to their syncobjs
++            ctx.push_fences();
++            Ok(0)
++        })
++    }
++
+     pub(crate) fn vm_bind(
+         tdev: &TyrDevice,
+         vmbind: &mut uapi::drm_panthor_vm_bind,
+         file: &DrmFile,
+     ) -> Result<u32> {
+         if vmbind.flags & uapi::drm_panthor_vm_bind_flags_DRM_PANTHOR_VM_BIND_ASYNC != 0 {
+-            dev_info!(tdev.as_ref(), "We do not support async VM_BIND yet");
+-            return Err(ENOTSUPP);
++            return Self::vm_bind_async(tdev, vmbind, file);
+         }
+ 
+         if vmbind.ops.stride as usize != core::mem::size_of::<uapi::drm_panthor_vm_bind_op>() {
+diff --git a/drivers/gpu/drm/tyr/fw.rs b/drivers/gpu/drm/tyr/fw.rs
+index 0d57845b9c..979c1fce51 100644
+--- a/drivers/gpu/drm/tyr/fw.rs
++++ b/drivers/gpu/drm/tyr/fw.rs
+@@ -224,6 +224,7 @@ pub(crate) fn init(
+                     kernel: 0..4 * SZ_1G as u64,
+                 },
+                 auto_kernel_va,
++                iomem.clone(),
+             )?;
+ 
+             mmu.bind_vm(vm.clone(), gpu_info, &iomem)?;
+diff --git a/drivers/gpu/drm/tyr/mmu.rs b/drivers/gpu/drm/tyr/mmu.rs
+index 32b1b321f7..9923ec0e13 100644
+--- a/drivers/gpu/drm/tyr/mmu.rs
++++ b/drivers/gpu/drm/tyr/mmu.rs
+@@ -53,9 +53,10 @@ pub(crate) fn create_vm(
+         for_mcu: bool,
+         layout: VmLayout,
+         auto_kernel_va: Range<u64>,
++        iomem: Arc<Devres<IoMem>>,
+         /* coherent: bool, */
+     ) -> Result<Arc<Mutex<Vm>>> {
+-        let vm = Vm::create(tdev, pdev, for_mcu, gpu_info, layout, auto_kernel_va)?;
++        let vm = Vm::create(tdev, pdev, for_mcu, gpu_info, layout, auto_kernel_va, iomem)?;
+ 
+         let vm = Arc::pin_init(new_mutex!(vm), GFP_KERNEL)?;
+         self.vms.push(vm.clone(), GFP_KERNEL)?;
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index 5778f1bb4d..c402bbad59 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -29,6 +29,8 @@
+ use kernel::devres::Devres;
+ use kernel::drm::gem::shmem;
+ use kernel::drm::gpuvm::ExecToken;
++use kernel::drm::sched::Entity;
++use kernel::drm::sched::Scheduler;
+ use kernel::io::mem::IoMem;
+ use kernel::io_pgtable::ARM64LPAES1;
+ use kernel::io_pgtable::{self};
+@@ -37,6 +39,7 @@
+ use kernel::sizes::SZ_4K;
+ use kernel::sync::Arc;
+ use kernel::sync::Mutex;
++use kernel::time::Delta;
+ use kernel::types::ARef;
+ 
+ use crate::driver::TyrDevice;
+@@ -48,6 +51,7 @@
+ use crate::mmu::Mmu;
+ use crate::regs;
+ 
++pub(crate) mod bind_job;
+ mod gpuvm;
+ pub(crate) mod map_flags;
+ pub(crate) mod pool;
+@@ -55,6 +59,8 @@
+ mod range;
+ pub(crate) use self::range::{LiveRange, RangeAlloc};
+ 
++pub(crate) use bind_job::{VmBindJob, VmOperation};
++
+ // TODO: we need *all* of these in kernel::bindings.
+ const SZ_4G: u64 = 4 * kernel::bindings::SZ_1G as u64;
+ 
+@@ -82,6 +88,20 @@ pub(crate) struct Vm {
+     /// Destroyed VMs are unmapped and cannot be the target of map operations
+     /// anymore.
+     pub(super) destroyed: bool,
++
++    /// Whether this VM is in an unusable state due to failed async operations.
++    ///
++    /// Unusable VMs cannot accept new operations and should be destroyed.
++    pub(crate) unusable: bool,
++
++    /// IoMem reference needed for VM operations.
++    pub(crate) iomem: Arc<Devres<IoMem>>,
++
++    /// DRM scheduler for async VM operations.
++    pub(crate) scheduler: kernel::drm::sched::Scheduler<VmBindJob>,
++
++    /// DRM scheduler entity for submitting jobs.
++    pub(crate) entity: kernel::drm::sched::Entity<VmBindJob>,
+ }
+ 
+ impl Vm {
+@@ -92,6 +112,7 @@ pub(super) fn create(
+         gpu_info: &GpuInfo,
+         layout: VmLayout,
+         auto_kernel_va: Range<u64>,
++        iomem: Arc<Devres<IoMem>>,
+     ) -> Result<Self> {
+         // We should ideally not allocate memory for this, but there is no way
+         // to create dummy GPUVM GEM objects for now.
+@@ -130,6 +151,12 @@ pub(super) fn create(
+ 
+         let memattr = mair_to_memattr(page_table.cfg().mair);
+ 
++        let scheduler =
++            kernel::drm::sched::Scheduler::new(tdev.as_ref(), 1, 1, 1, 1000, c_str!("tyr_vm"))?;
++
++        let entity =
++            kernel::drm::sched::Entity::new(&scheduler, kernel::drm::sched::Priority::Low)?;
++
+         Ok(Vm {
+             _dummy_obj: dummy_obj.gem.clone(),
+             gpuvm: kernel::drm::gpuvm::GpuVm::new(
+@@ -146,6 +173,10 @@ pub(super) fn create(
+             _layout: layout,
+             for_mcu,
+             destroyed: false,
++            unusable: false,
++            iomem,
++            scheduler,
++            entity,
+         })
+     }
+ 
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs b/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
+new file mode 100644
+index 0000000000..0fa433ac61
+--- /dev/null
++++ b/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-2.0 or MIT
++
++//! VM bind jobs for asynchronous VM operations.
++
++use core::ops::Range;
++
++use kernel::c_str;
++use kernel::dma_fence::FenceObject;
++use kernel::dma_fence::FenceOps;
++use kernel::drm::sched::JobImpl;
++use kernel::prelude::*;
++use kernel::str::CStr;
++use kernel::sync::Arc;
++use kernel::sync::Mutex;
++
++use super::map_flags;
++use super::Vm;
++use crate::gem;
++
++/// VM operation types for asynchronous VM bind.
++pub(crate) enum VmOperation {
++    /// Map a buffer object into the VM address space.
++    Map {
++        va_range: Range<u64>,
++        bo: crate::gem::ObjectRef,
++        bo_offset: u64,
++        flags: map_flags::Flags,
++    },
++    /// Unmap a VA range from the VM address space.
++    Unmap { va_range: Range<u64> },
++}
++
++/// A VM bind job that performs asynchronous page table modifications.
++pub(crate) struct VmBindJob {
++    /// The VM being operated on.
++    pub(crate) vm: Arc<Mutex<Vm>>,
++
++    /// The operation to perform.
++    pub(crate) operation: VmOperation,
++}
++
++impl VmBindJob {
++    pub(crate) fn new(vm: Arc<Mutex<Vm>>, operation: VmOperation) -> Self {
++        Self { vm, operation }
++    }
++}
++
++impl JobImpl for VmBindJob {
++    fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fence::Fence>> {
++        let mut vm = job.vm.lock();
++        let iomem = vm.iomem.clone();
++
++        let result = match &job.operation {
++            VmOperation::Map {
++                va_range,
++                bo,
++                bo_offset,
++                flags,
++            } => vm.bind_gem(iomem.clone(), &bo.gem, *bo_offset, va_range.clone(), *flags),
++            VmOperation::Unmap { va_range } => vm.unmap_range(iomem, va_range.clone()),
++        };
++
++        if result.is_err() {
++            pr_err!("Async VM bind operation failed, marking VM as unusable\n");
++            vm.unusable = true;
++        }
++
++        result.map(|_| None)
++    }
++
++    fn timed_out(_job: &mut kernel::drm::sched::Job<Self>) -> kernel::drm::sched::Status {
++        kernel::drm::sched::Status::NoDevice
++    }
++}
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/pool.rs b/drivers/gpu/drm/tyr/mmu/vm/pool.rs
+index d5aab5df30..7b54c134cf 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/pool.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/pool.rs
+@@ -46,6 +46,7 @@ pub(crate) fn create_vm(&self, tdev: &ARef<TyrDevice>, layout: VmLayout) -> Resu
+                     false,
+                     layout,
+                     auto_kernel_va,
++                    tdev.iomem.clone(),
+                 )
+             })
+         }?;
+diff --git a/drivers/gpu/drm/tyr/sched/deps.rs b/drivers/gpu/drm/tyr/sched/deps.rs
+index 9e98649f67..61d6788b2c 100644
+--- a/drivers/gpu/drm/tyr/sched/deps.rs
++++ b/drivers/gpu/drm/tyr/sched/deps.rs
+@@ -13,8 +13,15 @@
+ 
+ use crate::driver::TyrDriver;
+ use crate::file::DrmFile;
++use crate::mmu::vm::VmBindJob;
+ use crate::sched::job::Job;
+ 
++/// Represents either a GPU job or a VM bind job
++pub(crate) enum JobType {
++    Gpu(Job),
++    VmBind(VmBindJob),
++}
++
+ pub(crate) enum SyncHandle {
+     Binary { handle: u32 },
+     Timeline { handle: u32, timeline_value: u64 },
+@@ -134,7 +141,7 @@ fn current_fence(&self) -> Option<&Fence> {
+ /// Job state tracking for a job in the submission context
+ enum JobState {
+     /// Job is ready to be processed
+-    Pending(Job),
++    Pending(JobType),
+     /// Job has been taken out and is being processed
+     Taken,
+ }
+@@ -197,7 +204,19 @@ pub(crate) fn add_job(&mut self, job: Job, syncops: Arc<KVec<SyncOp>>) -> Result
+         self.jobs
+             .push(
+                 JobContext {
+-                    state: JobState::Pending(job),
++                    state: JobState::Pending(JobType::Gpu(job)),
++                    syncops,
++                },
++                GFP_KERNEL,
++            )
++            .map_err(Into::into)
++    }
++
++    pub(crate) fn add_vm_bind_job(&mut self, job: VmBindJob, syncops: Arc<KVec<SyncOp>>) -> Result {
++        self.jobs
++            .push(
++                JobContext {
++                    state: JobState::Pending(JobType::VmBind(job)),
+                     syncops,
+                 },
+                 GFP_KERNEL,
+@@ -221,12 +240,18 @@ pub(crate) fn collect_signal_ops(&mut self, syncops: &[SyncOp]) -> Result {
+     /// immediately to avoid lifetime conflicts.
+     pub(crate) fn add_deps_and_push_jobs(&mut self, entity: &mut Entity<Job>) -> Result {
+         for job_idx in 0..self.jobs.len() {
++            // Only process GPU jobs with this entity
++            match &self.jobs[job_idx].state {
++                JobState::Pending(JobType::Gpu(_)) => {}
++                JobState::Pending(JobType::VmBind(_)) => continue,
++                JobState::Taken => continue,
++            }
++
+             let fences = self.collect_job_deps(job_idx)?;
+ 
+             let job = match core::mem::replace(&mut self.jobs[job_idx].state, JobState::Taken) {
+-                JobState::Pending(job) => job,
+-                JobState::Taken => {
+-                    // This should never happen - we're processing jobs sequentially
++                JobState::Pending(JobType::Gpu(job)) => job,
++                _ => {
+                     return Err(EINVAL);
+                 }
+             };
+@@ -250,6 +275,45 @@ pub(crate) fn add_deps_and_push_jobs(&mut self, entity: &mut Entity<Job>) -> Res
+         Ok(())
+     }
+ 
++    /// Add VM bind job dependencies, arm jobs, and push them to the scheduler.
++    pub(crate) fn add_deps_and_push_vm_bind_jobs(
++        &mut self,
++        entity: &mut Entity<VmBindJob>,
++    ) -> Result {
++        for job_idx in 0..self.jobs.len() {
++            // Only process VM bind jobs with this entity
++            match &self.jobs[job_idx].state {
++                JobState::Pending(JobType::VmBind(_)) => {}
++                JobState::Pending(JobType::Gpu(_)) => continue,
++                JobState::Taken => continue,
++            }
++
++            let fences = self.collect_job_deps(job_idx)?;
++
++            let job = match core::mem::replace(&mut self.jobs[job_idx].state, JobState::Taken) {
++                JobState::Pending(JobType::VmBind(job)) => job,
++                _ => {
++                    return Err(EINVAL);
++                }
++            };
++
++            let mut pending_job = entity.new_job(1, 0, job)?;
++
++            for fence in fences {
++                pending_job.add_dependency(fence)?;
++            }
++
++            let mut armed_job = pending_job.arm();
++
++            // Update the sync signal fences with the job's completion fence
++            self.update_job_syncs(job_idx, armed_job.fences().finished())?;
++
++            armed_job.push();
++        }
++
++        Ok(())
++    }
++
+     /// Push signal fences to their associated syncobjs
+     ///
+     /// This is the last step of a submission procedure, and is done once we know
+-- 
+2.51.0
+

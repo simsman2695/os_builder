@@ -288,6 +288,8 @@ test_gpu_detection() {
             gpu_driver="panfrost"
         elif [[ -d /sys/module/panthor ]]; then
             gpu_driver="panthor"
+        elif [[ -d /sys/module/tyr ]]; then
+            gpu_driver="tyr"
         fi
 
         log PASS "GPU detected via DRM"
@@ -297,25 +299,41 @@ test_gpu_detection() {
         record_result "gpu_drm" "FAIL" "No /sys/class/drm/card0"
     fi
 
-    # Check driver
+    # Check driver — Panthor built-in (=y) won't appear in /sys/module,
+    # so also check the DRM card's driver symlink.
     if [[ -d /sys/module/panthor ]]; then
-        log PASS "Panthor GPU driver loaded"
+        log PASS "Panthor GPU driver loaded (module)"
         record_result "gpu_driver" "PASS" "panthor"
+    elif [[ -e /sys/class/drm/card0/device/driver ]] && \
+         readlink -f /sys/class/drm/card0/device/driver 2>/dev/null | grep -q panthor; then
+        log PASS "Panthor GPU driver loaded (built-in)"
+        record_result "gpu_driver" "PASS" "panthor (built-in)"
+    elif [[ -d /sys/module/tyr ]]; then
+        log PASS "Tyr GPU driver loaded (module)"
+        record_result "gpu_driver" "PASS" "tyr"
     elif lsmod 2>/dev/null | grep -q mali; then
         log PASS "Mali GPU driver loaded"
         record_result "gpu_driver" "PASS" "mali-blob"
     else
-        log WARN "GPU driver not detected in expected location"
-        record_result "gpu_driver" "WARN" "driver unknown"
+        log FAIL "GPU driver not detected"
+        record_result "gpu_driver" "FAIL" "driver unknown"
     fi
 
-    # Check render node
-    if [[ -e /dev/dri/renderD128 ]]; then
-        log PASS "GPU render node available (/dev/dri/renderD128)"
-        record_result "gpu_render" "PASS" "renderD128 present"
+    # Check render node (may not always be renderD128)
+    local render_node=""
+    for rn in /dev/dri/renderD*; do
+        if [[ -e "$rn" ]]; then
+            render_node="$rn"
+            break
+        fi
+    done
+
+    if [[ -n "$render_node" ]]; then
+        log PASS "GPU render node available ($render_node)"
+        record_result "gpu_render" "PASS" "$(basename "$render_node") present"
     else
-        log WARN "GPU render node not found"
-        record_result "gpu_render" "WARN" "No renderD128"
+        log FAIL "GPU render node not found"
+        record_result "gpu_render" "FAIL" "No renderD*"
     fi
 }
 
@@ -608,7 +626,7 @@ test_audio_detection() {
     # Check for sound cards
     if [[ -f /proc/asound/cards ]]; then
         local card_count
-        card_count=$(grep -c "^\s*[0-9]" /proc/asound/cards 2>/dev/null || echo "0")
+        card_count=$(grep -c "^\s*[0-9]" /proc/asound/cards 2>/dev/null || true)
 
         if [[ $card_count -gt 0 ]]; then
             log PASS "Sound cards detected: $card_count"
@@ -891,57 +909,171 @@ test_rtc() {
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NPU Tests (RK3588 Neural Processing Unit — 3-core, 6 TOPS)
+#   Supports two drivers:
+#     - Rocket: open-source DRM accel driver (mainline 6.18+)
+#     - RKNPU:  proprietary Rockchip driver (vendor 6.1 kernel)
 # ══════════════════════════════════════════════════════════════════════════════
 
-NPU_DEVFREQ="/sys/class/devfreq/fdab0000.npu"
 NPU_STRESS_DURATION=60
+
+# Detect which NPU driver is active. Sets NPU_MODE to "rocket", "rknpu", or "none".
+detect_npu_mode() {
+    if [[ -e /dev/accel/accel0 ]] || [[ -d /sys/module/rocket ]]; then
+        NPU_MODE="rocket"
+    elif [[ -c /dev/rknpu ]] || [[ -d /sys/module/rknpu ]]; then
+        NPU_MODE="rknpu"
+    else
+        NPU_MODE="none"
+    fi
+}
+
+# Locate the NPU devfreq path (differs between drivers).
+find_npu_devfreq() {
+    NPU_DEVFREQ=""
+    # RKNPU vendor kernel uses a fixed DT address
+    if [[ -d /sys/class/devfreq/fdab0000.npu ]]; then
+        NPU_DEVFREQ="/sys/class/devfreq/fdab0000.npu"
+        return
+    fi
+    # Rocket may register under a different devfreq name — search for it
+    local d
+    for d in /sys/class/devfreq/*; do
+        if [[ -d "$d" ]]; then
+            local dtype
+            dtype=$(cat "$d/device/uevent" 2>/dev/null | grep -oP 'OF_COMPATIBLE_0=\K.*' || true)
+            if [[ "$dtype" == *"rocket"* ]] || [[ "$dtype" == *"npu"* ]]; then
+                NPU_DEVFREQ="$d"
+                return
+            fi
+        fi
+    done
+}
 
 test_npu_detection() {
     log STEP "Testing NPU detection..."
 
-    # Check for RKNPU device node
-    if [[ -c /dev/rknpu ]]; then
-        log PASS "NPU device present: /dev/rknpu"
-        record_result "npu_device" "PASS" "rknpu present"
-    else
-        log FAIL "NPU device node /dev/rknpu not found"
-        record_result "npu_device" "FAIL" "Not found"
-        return
-    fi
+    detect_npu_mode
+    find_npu_devfreq
 
-    # Check NPU driver loaded
-    if [[ -d /sys/module/rknpu ]]; then
-        log PASS "RKNPU kernel module loaded"
-        record_result "npu_driver" "PASS" "rknpu module loaded"
-    else
-        log WARN "RKNPU kernel module not detected in /sys/module"
-        record_result "npu_driver" "WARN" "Module not in sysfs"
-    fi
+    case "$NPU_MODE" in
+        rocket)
+            log PASS "NPU device present: /dev/accel/accel0 (Rocket driver)"
+            record_result "npu_device" "PASS" "rocket accel0"
 
-    # Driver version from dmesg
-    local drv_version
-    drv_version=$(dmesg 2>/dev/null | grep -oP "RKNPU driver version: \K[^\s]+" | tail -1 || echo "")
-    if [[ -n "$drv_version" ]]; then
-        log INFO "NPU driver version: $drv_version"
-    fi
+            # Check Rocket kernel module
+            if [[ -d /sys/module/rocket ]]; then
+                log PASS "Rocket kernel module loaded"
+                record_result "npu_driver" "PASS" "rocket module loaded"
+            else
+                log WARN "Rocket module not detected in /sys/module (may be built-in)"
+                record_result "npu_driver" "WARN" "Module not in sysfs"
+            fi
 
-    # Check NPU core count from device tree / debug
-    local npu_cores=0
-    if [[ -f /sys/kernel/debug/rknpu/load ]]; then
-        npu_cores=$(wc -l < /sys/kernel/debug/rknpu/load 2>/dev/null || echo "0")
-    fi
-    if [[ $npu_cores -ge 3 ]]; then
-        log PASS "NPU cores: $npu_cores (expected 3 for RK3588)"
-        record_result "npu_cores" "PASS" "$npu_cores cores"
-    elif [[ $npu_cores -gt 0 ]]; then
-        log WARN "NPU cores: $npu_cores (expected 3 for RK3588)"
-        record_result "npu_cores" "WARN" "$npu_cores cores"
-    else
-        log INFO "NPU core count not available via debug interface"
-    fi
+            # DRM accel device info
+            if [[ -e /dev/accel/accel0 ]]; then
+                local accel_name=""
+                if [[ -f /sys/class/accel/accel0/device/driver/module/drivers/platform:rocket ]]; then
+                    accel_name="rocket"
+                fi
+                log INFO "DRM accel device: /dev/accel/accel0 ${accel_name:+(driver: $accel_name)}"
+            fi
 
-    # Check devfreq (frequency management)
-    if [[ -d "$NPU_DEVFREQ" ]]; then
+            # Check TFLite runtime (installed under python3.11 via deadsnakes)
+            if python3.11 -c "import tflite_runtime" 2>/dev/null; then
+                log PASS "TFLite runtime available (python3.11)"
+                record_result "npu_runtime" "PASS" "tflite-runtime present"
+            else
+                log FAIL "TFLite runtime not installed (python3.11)"
+                record_result "npu_runtime" "FAIL" "tflite-runtime missing"
+            fi
+
+            # Check for Teflon delegate (Mesa libteflon.so → NPU acceleration)
+            local teflon_lib=""
+            for tpath in /usr/lib/aarch64-linux-gnu/libteflon.so /usr/lib/libteflon.so /usr/local/lib/libteflon.so; do
+                if [[ -f "$tpath" ]]; then
+                    teflon_lib="$tpath"
+                    break
+                fi
+            done
+            if [[ -n "$teflon_lib" ]]; then
+                log PASS "Teflon delegate: $teflon_lib"
+                record_result "npu_teflon" "PASS" "libteflon.so present"
+            else
+                log WARN "Teflon delegate (libteflon.so) not found — inference will use CPU fallback"
+                record_result "npu_teflon" "WARN" "libteflon.so missing"
+            fi
+            ;;
+
+        rknpu)
+            log PASS "NPU device present: /dev/rknpu (RKNPU driver)"
+            record_result "npu_device" "PASS" "rknpu present"
+
+            # Check RKNPU driver loaded
+            if [[ -d /sys/module/rknpu ]]; then
+                log PASS "RKNPU kernel module loaded"
+                record_result "npu_driver" "PASS" "rknpu module loaded"
+            else
+                log WARN "RKNPU kernel module not detected in /sys/module"
+                record_result "npu_driver" "WARN" "Module not in sysfs"
+            fi
+
+            # Driver version from dmesg
+            local drv_version
+            drv_version=$(dmesg 2>/dev/null | grep -oP "RKNPU driver version: \K[^\s]+" | tail -1 || echo "")
+            if [[ -n "$drv_version" ]]; then
+                log INFO "NPU driver version: $drv_version"
+            fi
+
+            # Check NPU core count from device tree / debug
+            local npu_cores=0
+            if [[ -f /sys/kernel/debug/rknpu/load ]]; then
+                npu_cores=$(wc -l < /sys/kernel/debug/rknpu/load 2>/dev/null || echo "0")
+            fi
+            if [[ $npu_cores -ge 3 ]]; then
+                log PASS "NPU cores: $npu_cores (expected 3 for RK3588)"
+                record_result "npu_cores" "PASS" "$npu_cores cores"
+            elif [[ $npu_cores -gt 0 ]]; then
+                log WARN "NPU cores: $npu_cores (expected 3 for RK3588)"
+                record_result "npu_cores" "WARN" "$npu_cores cores"
+            else
+                log INFO "NPU core count not available via debug interface"
+            fi
+
+            # Check for RKNN runtime library
+            local rknn_lib=""
+            if [[ -f /usr/lib/librknnrt.so ]]; then
+                rknn_lib="/usr/lib/librknnrt.so"
+            elif [[ -f /usr/lib/aarch64-linux-gnu/librknnrt.so ]]; then
+                rknn_lib="/usr/lib/aarch64-linux-gnu/librknnrt.so"
+            fi
+
+            if [[ -n "$rknn_lib" ]]; then
+                log PASS "RKNN runtime library: $rknn_lib"
+                record_result "npu_runtime" "PASS" "librknnrt present"
+            else
+                log FAIL "RKNN runtime library (librknnrt.so) not found"
+                record_result "npu_runtime" "FAIL" "librknnrt missing"
+            fi
+
+            # Check for rknn_server
+            if check_command rknn_server; then
+                log PASS "rknn_server binary available"
+                record_result "npu_server" "PASS" "rknn_server present"
+            else
+                log WARN "rknn_server not found in PATH"
+                record_result "npu_server" "WARN" "rknn_server missing"
+            fi
+            ;;
+
+        none)
+            log FAIL "No NPU device found (checked /dev/accel/accel0 and /dev/rknpu)"
+            record_result "npu_device" "FAIL" "Not found"
+            return
+            ;;
+    esac
+
+    # Check devfreq (frequency management) — common to both drivers
+    if [[ -n "$NPU_DEVFREQ" && -d "$NPU_DEVFREQ" ]]; then
         local cur_freq avail_freqs max_freq governor
         cur_freq=$(($(cat "$NPU_DEVFREQ/cur_freq" 2>/dev/null || echo "0") / 1000000))
         max_freq=$(($(cat "$NPU_DEVFREQ/max_freq" 2>/dev/null || echo "0") / 1000000))
@@ -959,44 +1091,24 @@ test_npu_detection() {
             log INFO "NPU available frequencies:${freq_list}"
         fi
     else
-        log WARN "NPU devfreq not available at $NPU_DEVFREQ"
-        record_result "npu_devfreq" "WARN" "devfreq missing"
-    fi
-
-    # Check for RKNN runtime library
-    local rknn_lib=""
-    if [[ -f /usr/lib/librknnrt.so ]]; then
-        rknn_lib="/usr/lib/librknnrt.so"
-    elif [[ -f /usr/lib/aarch64-linux-gnu/librknnrt.so ]]; then
-        rknn_lib="/usr/lib/aarch64-linux-gnu/librknnrt.so"
-    fi
-
-    if [[ -n "$rknn_lib" ]]; then
-        log PASS "RKNN runtime library: $rknn_lib"
-        record_result "npu_runtime" "PASS" "librknnrt present"
-    else
-        log FAIL "RKNN runtime library (librknnrt.so) not found"
-        record_result "npu_runtime" "FAIL" "librknnrt missing"
-    fi
-
-    # Check for rknn_server
-    if check_command rknn_server; then
-        log PASS "rknn_server binary available"
-        record_result "npu_server" "PASS" "rknn_server present"
-    else
-        log WARN "rknn_server not found in PATH"
-        record_result "npu_server" "WARN" "rknn_server missing"
+        if [[ "$NPU_MODE" == "rocket" ]]; then
+            # Rocket driver (6.18) doesn't support devfreq yet — known limitation
+            log INFO "NPU devfreq not available (Rocket driver does not support devfreq yet)"
+        else
+            log FAIL "NPU devfreq not available"
+            record_result "npu_devfreq" "FAIL" "devfreq missing"
+        fi
     fi
 }
 
 test_npu_functional() {
     [[ "$TEST_MODE" == "quick" ]] && return
-    [[ ! -c /dev/rknpu ]] && return
+    [[ "$NPU_MODE" == "none" ]] && return
 
-    log STEP "Testing NPU functionality..."
+    log STEP "Testing NPU functionality ($NPU_MODE) ..."
 
-    # Test frequency scaling
-    if [[ -d "$NPU_DEVFREQ" && -w "$NPU_DEVFREQ/governor" ]]; then
+    # ── Frequency scaling test (common, if devfreq present) ───────────────
+    if [[ -n "$NPU_DEVFREQ" && -d "$NPU_DEVFREQ" && -w "$NPU_DEVFREQ/governor" ]]; then
         local orig_governor avail_freqs
         orig_governor=$(cat "$NPU_DEVFREQ/governor" 2>/dev/null)
         avail_freqs=$(cat "$NPU_DEVFREQ/available_frequencies" 2>/dev/null || echo "")
@@ -1006,12 +1118,10 @@ test_npu_functional() {
             local min_f="${freq_arr[0]}"
             local max_f="${freq_arr[-1]}"
 
-            # Switch to userspace governor to test frequency changes
             echo userspace > "$NPU_DEVFREQ/governor" 2>/dev/null || true
 
             local scaling_ok=true
 
-            # Set to min frequency
             if echo "$min_f" > "$NPU_DEVFREQ/userspace/set_freq" 2>/dev/null; then
                 sleep 0.5
                 local actual
@@ -1023,7 +1133,6 @@ test_npu_functional() {
                 fi
             fi
 
-            # Set to max frequency
             if echo "$max_f" > "$NPU_DEVFREQ/userspace/set_freq" 2>/dev/null; then
                 sleep 0.5
                 local actual
@@ -1035,7 +1144,6 @@ test_npu_functional() {
                 fi
             fi
 
-            # Restore original governor
             echo "$orig_governor" > "$NPU_DEVFREQ/governor" 2>/dev/null || true
 
             if $scaling_ok; then
@@ -1050,47 +1158,71 @@ test_npu_functional() {
         log INFO "NPU devfreq not writable, skipping frequency scaling test"
     fi
 
-    # Test rknn_server start/stop
-    if check_command rknn_server; then
-        log INFO "Testing rknn_server startup..."
-        rknn_server &>/dev/null &
-        local server_pid=$!
-        sleep 2
+    # ── Driver-specific functional tests ──────────────────────────────────
+    if [[ "$NPU_MODE" == "rknpu" ]]; then
+        # Test rknn_server start/stop
+        if check_command rknn_server; then
+            log INFO "Testing rknn_server startup..."
+            rknn_server &>/dev/null &
+            local server_pid=$!
+            sleep 2
 
-        if kill -0 "$server_pid" 2>/dev/null; then
-            log PASS "rknn_server started successfully (PID $server_pid)"
-            record_result "npu_server_start" "PASS" "Starts OK"
-            kill "$server_pid" 2>/dev/null
-            wait "$server_pid" 2>/dev/null || true
+            if kill -0 "$server_pid" 2>/dev/null; then
+                log PASS "rknn_server started successfully (PID $server_pid)"
+                record_result "npu_server_start" "PASS" "Starts OK"
+                kill "$server_pid" 2>/dev/null
+                wait "$server_pid" 2>/dev/null || true
+            else
+                log WARN "rknn_server exited unexpectedly"
+                record_result "npu_server_start" "WARN" "Exited early"
+            fi
+        fi
+
+        # Check for NPU errors in dmesg
+        local npu_errors
+        npu_errors=$(dmesg 2>/dev/null | grep -icE "rknpu.*(error|fail|timeout)" || true)
+        if [[ "$npu_errors" -eq 0 ]]; then
+            log PASS "No NPU errors in dmesg"
+            record_result "npu_errors" "PASS" "No errors"
         else
-            log WARN "rknn_server exited unexpectedly"
-            record_result "npu_server_start" "WARN" "Exited early"
+            log WARN "Found $npu_errors NPU-related errors in dmesg"
+            record_result "npu_errors" "WARN" "$npu_errors errors"
+            dmesg 2>/dev/null | grep -iE "rknpu.*(error|fail|timeout)" | tail -5 | while read -r line; do
+                log INFO "  $line"
+            done
+        fi
+    elif [[ "$NPU_MODE" == "rocket" ]]; then
+        # Check for Rocket/DRM accel errors in dmesg
+        local npu_errors
+        npu_errors=$(dmesg 2>/dev/null | grep -icE "rocket.*(error|fail|timeout)" || true)
+        if [[ "$npu_errors" -eq 0 ]]; then
+            log PASS "No Rocket NPU errors in dmesg"
+            record_result "npu_errors" "PASS" "No errors"
+        else
+            log WARN "Found $npu_errors Rocket NPU errors in dmesg"
+            record_result "npu_errors" "WARN" "$npu_errors errors"
+            dmesg 2>/dev/null | grep -iE "rocket.*(error|fail|timeout)" | tail -5 | while read -r line; do
+                log INFO "  $line"
+            done
         fi
     fi
 
-    # Check for NPU errors in dmesg
-    local npu_errors
-    npu_errors=$(dmesg 2>/dev/null | grep -icE "rknpu.*(error|fail|timeout)" || echo "0")
-    if [[ "$npu_errors" -eq 0 ]]; then
-        log PASS "No NPU errors in dmesg"
-        record_result "npu_errors" "PASS" "No errors"
+    # ── Inference test (driver-appropriate script) ────────────────────────
+    local inference_script="" inference_python="python3"
+    if [[ "$NPU_MODE" == "rocket" ]]; then
+        inference_script="/usr/local/lib/hw-test/npu_inference_test_rocket.py"
+        inference_python="python3.11"  # tflite-runtime requires python3.11
     else
-        log WARN "Found $npu_errors NPU-related errors in dmesg"
-        record_result "npu_errors" "WARN" "$npu_errors errors"
-        dmesg 2>/dev/null | grep -iE "rknpu.*(error|fail|timeout)" | tail -5 | while read -r line; do
-            log INFO "  $line"
-        done
+        inference_script="/usr/local/lib/hw-test/npu_inference_test.py"
     fi
 
-    # Run real NPU inference test (MobileNet + optional OCR)
-    local inference_script="/usr/local/lib/hw-test/npu_inference_test.py"
-    if check_command python3 && [[ -f "$inference_script" ]]; then
-        log INFO "Running NPU inference test (MobileNet on NPU) ..."
+    if check_command "$inference_python" && [[ -f "$inference_script" ]]; then
+        log INFO "Running NPU inference test ($NPU_MODE: $(basename "$inference_script")) ..."
         local inference_output
-        inference_output=$(python3 "$inference_script" 2>/dev/null) || true
+        inference_output=$("$inference_python" "$inference_script" 2>/dev/null) || true
 
         if [[ -n "$inference_output" ]]; then
-            # Parse MobileNet results
+            # Parse MobileNet results (same JSON format for both drivers)
             local mn_status mn_ms mn_error
             mn_status=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('status','SKIP'))" 2>/dev/null || echo "SKIP")
             mn_ms=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('inference_ms','?'))" 2>/dev/null || echo "?")
@@ -1098,9 +1230,16 @@ test_npu_functional() {
 
             case "$mn_status" in
                 PASS)
-                    log PASS "MobileNet inference OK (avg ${mn_ms}ms on NPU)"
-                    record_result "npu_inference" "PASS" "${mn_ms}ms avg"
-                    # Show top prediction
+                    # For Rocket: report whether inference ran on NPU (Teflon) or CPU fallback
+                    local mn_backend=""
+                    if [[ "$NPU_MODE" == "rocket" ]]; then
+                        mn_backend=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mobilenet',{}).get('backend','?'))" 2>/dev/null || echo "?")
+                        log PASS "MobileNet inference OK (avg ${mn_ms}ms, backend: ${mn_backend})"
+                        record_result "npu_inference" "PASS" "${mn_ms}ms avg (${mn_backend})"
+                    else
+                        log PASS "MobileNet inference OK (avg ${mn_ms}ms on NPU)"
+                        record_result "npu_inference" "PASS" "${mn_ms}ms avg"
+                    fi
                     local top_class top_conf
                     top_class=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['mobilenet']['top5'][0]['class_id'])" 2>/dev/null || echo "?")
                     top_conf=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['mobilenet']['top5'][0]['confidence'])" 2>/dev/null || echo "?")
@@ -1115,37 +1254,39 @@ test_npu_functional() {
                     ;;
             esac
 
-            # Parse OCR results (if available)
-            local ocr_status
-            ocr_status=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ocr',{}).get('status','NONE'))" 2>/dev/null || echo "NONE")
+            # Parse OCR results (RKNPU only, if available)
+            if [[ "$NPU_MODE" == "rknpu" ]]; then
+                local ocr_status
+                ocr_status=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ocr',{}).get('status','NONE'))" 2>/dev/null || echo "NONE")
 
-            if [[ "$ocr_status" != "NONE" ]]; then
-                local ocr_expected ocr_recognized ocr_match ocr_ms
-                ocr_expected=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['expected'])" 2>/dev/null || echo "?")
-                ocr_recognized=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['recognized'])" 2>/dev/null || echo "?")
-                ocr_match=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['match'])" 2>/dev/null || echo "?")
-                ocr_ms=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['inference_ms'])" 2>/dev/null || echo "?")
+                if [[ "$ocr_status" != "NONE" ]]; then
+                    local ocr_expected ocr_recognized ocr_match ocr_ms
+                    ocr_expected=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['expected'])" 2>/dev/null || echo "?")
+                    ocr_recognized=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['recognized'])" 2>/dev/null || echo "?")
+                    ocr_match=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['match'])" 2>/dev/null || echo "?")
+                    ocr_ms=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr']['inference_ms'])" 2>/dev/null || echo "?")
 
-                case "$ocr_status" in
-                    PASS)
-                        log PASS "OCR test: '${ocr_recognized}' matches expected '${ocr_expected}' (${ocr_ms}ms)"
-                        record_result "npu_ocr" "PASS" "Recognized '${ocr_recognized}' in ${ocr_ms}ms"
-                        ;;
-                    WARN)
-                        log WARN "OCR test: recognized '${ocr_recognized}', expected '${ocr_expected}' (${ocr_ms}ms)"
-                        record_result "npu_ocr" "WARN" "Expected '${ocr_expected}' got '${ocr_recognized}'"
-                        ;;
-                    FAIL)
-                        local ocr_error
-                        ocr_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr'].get('error',''))" 2>/dev/null || echo "")
-                        log FAIL "OCR test failed: $ocr_error"
-                        record_result "npu_ocr" "FAIL" "$ocr_error"
-                        ;;
-                esac
+                    case "$ocr_status" in
+                        PASS)
+                            log PASS "OCR test: '${ocr_recognized}' matches expected '${ocr_expected}' (${ocr_ms}ms)"
+                            record_result "npu_ocr" "PASS" "Recognized '${ocr_recognized}' in ${ocr_ms}ms"
+                            ;;
+                        WARN)
+                            log WARN "OCR test: recognized '${ocr_recognized}', expected '${ocr_expected}' (${ocr_ms}ms)"
+                            record_result "npu_ocr" "WARN" "Expected '${ocr_expected}' got '${ocr_recognized}'"
+                            ;;
+                        FAIL)
+                            local ocr_error
+                            ocr_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['ocr'].get('error',''))" 2>/dev/null || echo "")
+                            log FAIL "OCR test failed: $ocr_error"
+                            record_result "npu_ocr" "FAIL" "$ocr_error"
+                            ;;
+                    esac
+                fi
             fi
         else
             local skip_error
-            skip_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null || echo "rknnlite2 not available")
+            skip_error=$(echo "$inference_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null || echo "runtime not available")
             log INFO "NPU inference test skipped: $skip_error"
         fi
     else
@@ -1155,8 +1296,8 @@ test_npu_functional() {
 
 test_npu_stress() {
     [[ "$TEST_MODE" != "stress" ]] && return
-    [[ ! -c /dev/rknpu ]] && return
-    [[ ! -d "$NPU_DEVFREQ" ]] && return
+    [[ "$NPU_MODE" == "none" ]] && return
+    [[ -z "$NPU_DEVFREQ" || ! -d "$NPU_DEVFREQ" ]] && return
 
     log STEP "Running NPU stress test (${NPU_STRESS_DURATION}s at max frequency)..."
 
@@ -1428,7 +1569,7 @@ run_all_tests() {
     test_rtc
 
     # NPU Tests
-    header "NPU Tests (RKNPU2)"
+    header "NPU Tests (Rocket / RKNPU2)"
     test_npu_detection
     test_npu_functional
     test_npu_stress

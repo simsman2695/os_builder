@@ -1,0 +1,46 @@
+From d48057511a3553796072e33d8e5bcec9c3e1bb27 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 28 Oct 2025 14:00:14 -0300
+Subject: [PATCH 144/161] tyr: only hand out CSG slots if they actually exist
+
+If the FW does not expose the slot, we cannot assign it to a group. We
+are also limited by the number of available address spaces, with the
+usual reminder that AS0 is always taken by the firmware VM.
+---
+ drivers/gpu/drm/tyr/sched.rs | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index 2d1765cff1..4a6c4b4f41 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -148,7 +148,8 @@ pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+         let gpu_as_count = tdev.gpu_info.as_present & genmask_u32(1..=31);
+         let gpu_as_count = gpu_as_count.count_ones();
+ 
+-        let csg_slot_count = num_groups;
++        // Each CSG needs its own AS, so limit CSG count to available AS count
++        let csg_slot_count = core::cmp::min(num_groups, gpu_as_count);
+         let as_slot_count = gpu_as_count;
+ 
+         let wq = OwnedQueue::new(c_str!("tyr-csf-sched"), WqFlags::UNBOUND, 0)?;
+@@ -395,12 +396,15 @@ pub(crate) fn bind(&mut self, tdev: &TyrDevice, group: Arc<Group>) -> Result {
+             return Ok(());
+         }
+ 
++        // Only search within the valid CSG slots (those initialized in firmware)
+         let csg_idx = self
+             .csg_slots
+             .iter()
++            .take(self.csg_slot_count as usize)
+             .position(|slot| slot.is_none())
+             .ok_or(EBUSY)?;
+-        pr_warn!("Using csg slot {csg_idx}\n");
++
++        pr_info!("Using csg slot {csg_idx}\n");
+         self.bind_group(tdev, group, csg_idx)?;
+         self.program_csg_slot(tdev, csg_idx, Priority::Low)
+     }
+-- 
+2.51.0
+

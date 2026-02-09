@@ -1,0 +1,29 @@
+From deb54d20f11091f25f4bf6d85d0a0519c7da2957 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Tue, 26 Aug 2025 21:03:35 +0200
+Subject: [PATCH 049/161] fixup!: rust: dma_fence: Add DMA Fence abstraction
+
+As per commit:
+    bf33a00 ("dma-fence: Use a flag for 64-bit seqnos")
+`use_64bit_seqno` field has been dropped from `dma_fence_ops` struct.
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/kernel/dma_fence.rs | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/rust/kernel/dma_fence.rs b/rust/kernel/dma_fence.rs
+index a36543dd01..e0f130e34b 100644
+--- a/rust/kernel/dma_fence.rs
++++ b/rust/kernel/dma_fence.rs
+@@ -243,7 +243,6 @@ impl<T: FenceOps> FenceObject<T> {
+     const SIZE: usize = core::mem::size_of::<Self>();
+ 
+     const VTABLE: bindings::dma_fence_ops = bindings::dma_fence_ops {
+-        use_64bit_seqno: T::USE_64BIT_SEQNO,
+         get_driver_name: Some(get_driver_name_cb::<T>),
+         get_timeline_name: Some(get_timeline_name_cb::<T>),
+         enable_signaling: if T::HAS_ENABLE_SIGNALING {
+-- 
+2.51.0
+

@@ -1,0 +1,980 @@
+From ad8cb18d5d8405a99e4aafe2702f979414a9b142 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Thu, 16 Oct 2025 14:02:16 -0300
+Subject: [PATCH 110/161] tyr: rustfmt the driver
+
+---
+ drivers/gpu/drm/tyr/driver.rs       | 33 +++--------
+ drivers/gpu/drm/tyr/file.rs         | 65 ++++++++++------------
+ drivers/gpu/drm/tyr/fw/global.rs    | 85 ++++++++---------------------
+ drivers/gpu/drm/tyr/gem.rs          | 21 ++-----
+ drivers/gpu/drm/tyr/mmu.rs          | 25 ++-------
+ drivers/gpu/drm/tyr/mmu/as_lock.rs  |  7 +--
+ drivers/gpu/drm/tyr/mmu/vm.rs       | 10 ++--
+ drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs | 22 +++-----
+ drivers/gpu/drm/tyr/mmu/vm/range.rs |  4 +-
+ drivers/gpu/drm/tyr/sched.rs        | 30 +++-------
+ drivers/gpu/drm/tyr/sched/events.rs | 19 +++----
+ drivers/gpu/drm/tyr/sched/group.rs  | 35 +++++-------
+ drivers/gpu/drm/tyr/sched/queue.rs  | 18 ++----
+ drivers/gpu/drm/tyr/wait.rs         |  7 +--
+ 14 files changed, 122 insertions(+), 259 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/driver.rs b/drivers/gpu/drm/tyr/driver.rs
+index 88a6ca27e9..e72b054e63 100644
+--- a/drivers/gpu/drm/tyr/driver.rs
++++ b/drivers/gpu/drm/tyr/driver.rs
+@@ -196,14 +196,8 @@ fn probe(
+         stacks_clk.prepare_enable()?;
+         coregroup_clk.prepare_enable()?;
+ 
+-        let mali_regulator = Regulator::<regulator::Enabled>::get(
+-            pdev.as_ref(),
+-            c_str!("mali"),
+-        )?;
+-        let sram_regulator = Regulator::<regulator::Enabled>::get(
+-            pdev.as_ref(),
+-            c_str!("sram"),
+-        )?;
++        let mali_regulator = Regulator::<regulator::Enabled>::get(pdev.as_ref(), c_str!("mali"))?;
++        let sram_regulator = Regulator::<regulator::Enabled>::get(pdev.as_ref(), c_str!("sram"))?;
+ 
+         let iomem = Arc::pin_init(
+             IoMem::new(pdev.io_request_by_index(0).ok_or(EINVAL)?),
+@@ -218,9 +212,7 @@ fn probe(
+ 
+         unsafe {
+             pdev.dma_set_max_seg_size(u32::MAX);
+-            pdev.dma_set_mask_and_coherent(DmaMask::try_new(
+-                gpu_info.pa_bits(),
+-            )?)?;
++            pdev.dma_set_mask_and_coherent(DmaMask::try_new(gpu_info.pa_bits())?)?;
+         }
+         let platform: ARef<platform::Device> = pdev.into();
+ 
+@@ -229,11 +221,10 @@ fn probe(
+         // untill it gets fully initialised.
+         // Additionally implementation of Drop trait is still pending
+         // so no data will be accessed util proper init.
+-	let uninit = unsafe {
+-	    pin_init_from_closure::<TyrData, kernel::error::Error>(|_slot| Ok(()))
+-	};
+-	let data = Arc::pin_init(uninit, GFP_KERNEL)?;
+-	let tdev: ARef<TyrDevice> = drm::device::Device::new(pdev.as_ref(), Ok(data.clone()))?;
++        let uninit =
++            unsafe { pin_init_from_closure::<TyrData, kernel::error::Error>(|_slot| Ok(())) };
++        let data = Arc::pin_init(uninit, GFP_KERNEL)?;
++        let tdev: ARef<TyrDevice> = drm::device::Device::new(pdev.as_ref(), Ok(data.clone()))?;
+ 
+         let mmu = KBox::pin_init(new_mutex!(Mmu::new()?), GFP_KERNEL)?;
+ 
+@@ -275,8 +266,7 @@ fn probe(
+         });
+ 
+         unsafe {
+-            data_init
+-                .__pinned_init(Arc::<TyrData>::as_ptr(&tdev) as *mut TyrData)?;
++            data_init.__pinned_init(Arc::<TyrData>::as_ptr(&tdev) as *mut TyrData)?;
+         }
+ 
+         // We must find a way around this. It's being discussed on Zulip already.
+@@ -441,12 +431,7 @@ pub(crate) fn request<'a>(
+             _pin: PhantomPinned,
+         });
+ 
+-        pdev.request_threaded_irq_by_name(
+-            kernel::irq::Flags::SHARED,
+-            name,
+-            name,
+-            handler,
+-        )
++        pdev.request_threaded_irq_by_name(kernel::irq::Flags::SHARED, name, name, handler)
+     }
+ }
+ 
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 99ecd63b94..06ee853f97 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -68,8 +68,11 @@ pub(crate) fn dev_query(
+         } else {
+             match devquery.type_ {
+                 uapi::drm_panthor_dev_query_type_DRM_PANTHOR_DEV_QUERY_GPU_INFO => {
+-                    let mut writer =
+-                        UserSlice::new(UserPtr::from_addr(devquery.pointer as usize), devquery.size as usize).writer();
++                    let mut writer = UserSlice::new(
++                        UserPtr::from_addr(devquery.pointer as usize),
++                        devquery.size as usize,
++                    )
++                    .writer();
+ 
+                     writer.write(&tdev.gpu_info)?;
+ 
+@@ -87,10 +90,7 @@ pub(crate) fn vm_create(
+     ) -> Result<u32> {
+         let id = file.inner().vm_pool().create_vm(
+             &ARef::from(tdev),
+-            VmLayout::from_user_sz(
+-                tdev,
+-                VmUserSize::Custom(vmcreate.user_va_range),
+-            ),
++            VmLayout::from_user_sz(tdev, VmUserSize::Custom(vmcreate.user_va_range)),
+         )?;
+ 
+         vmcreate.id = id as u32;
+@@ -115,17 +115,12 @@ pub(crate) fn vm_bind(
+         vmbind: &mut uapi::drm_panthor_vm_bind,
+         file: &DrmFile,
+     ) -> Result<u32> {
+-        if vmbind.flags
+-            & uapi::drm_panthor_vm_bind_flags_DRM_PANTHOR_VM_BIND_ASYNC
+-            != 0
+-        {
++        if vmbind.flags & uapi::drm_panthor_vm_bind_flags_DRM_PANTHOR_VM_BIND_ASYNC != 0 {
+             dev_info!(tdev.as_ref(), "We do not support async VM_BIND yet");
+             return Err(ENOTSUPP);
+         }
+ 
+-        if vmbind.ops.stride as usize
+-            != core::mem::size_of::<uapi::drm_panthor_vm_bind_op>()
+-        {
++        if vmbind.ops.stride as usize != core::mem::size_of::<uapi::drm_panthor_vm_bind_op>() {
+             dev_info!(
+                 tdev.as_ref(),
+                 "We cannot graciously handle stride mismatches yet"
+@@ -136,11 +131,8 @@ pub(crate) fn vm_bind(
+         let stride = vmbind.ops.stride as usize;
+         let count = vmbind.ops.count as usize;
+ 
+-        let mut reader = UserSlice::new(
+-            UserPtr::from_addr(vmbind.ops.array as usize),
+-            stride,
+-        )
+-        .reader();
++        let mut reader =
++            UserSlice::new(UserPtr::from_addr(vmbind.ops.array as usize), stride).reader();
+         let iomem = tdev.iomem.clone();
+ 
+         for i in 0..count {
+@@ -211,9 +203,7 @@ pub(crate) fn bo_create(
+         bocreate: &mut uapi::drm_panthor_bo_create,
+         file: &DrmFile,
+     ) -> Result<u32> {
+-        if bocreate.flags & !uapi::drm_panthor_bo_flags_DRM_PANTHOR_BO_NO_MMAP
+-            != 0
+-        {
++        if bocreate.flags & !uapi::drm_panthor_bo_flags_DRM_PANTHOR_BO_NO_MMAP != 0 {
+             dev_err!(
+                 tdev.as_ref(),
+                 "bo_create: invalid flags {}\n",
+@@ -275,12 +265,10 @@ pub(crate) fn group_create(
+             queue_args.push(queue, GFP_KERNEL)?;
+         }
+ 
+-        let handle = file.inner().group_pool().create_group(
+-            tdev,
+-            groupcreate,
+-            file,
+-            queue_args,
+-        )?;
++        let handle = file
++            .inner()
++            .group_pool()
++            .create_group(tdev, groupcreate, file, queue_args)?;
+ 
+         groupcreate.group_handle = handle as u32;
+ 
+@@ -334,11 +322,11 @@ pub(crate) fn group_submit(
+             for _ in 0..queue.syncs.count {
+                 let sync: SyncOp = sync_reader.read()?;
+                 if sync.flags & !uapi::drm_panthor_sync_op_flags_DRM_PANTHOR_SYNC_OP_SIGNAL as u32
+-                                    != 0
+-                                {
+-                                    pr_err!("We only support DRM_PANTHOR_SYNC_OP_SIGNAL for now");
+-                                    return Err(ENOTSUPP);
+-                                }
++                    != 0
++                {
++                    pr_err!("We only support DRM_PANTHOR_SYNC_OP_SIGNAL for now");
++                    return Err(ENOTSUPP);
++                }
+ 
+                 syncs.push(sync, GFP_KERNEL)?;
+             }
+@@ -348,10 +336,7 @@ pub(crate) fn group_submit(
+ 
+         let mut out_syncs = kvec![];
+         for sync in syncs.iter().filter(|sync| {
+-            sync.flags
+-                & uapi::drm_panthor_sync_op_flags_DRM_PANTHOR_SYNC_OP_SIGNAL
+-                    as u32
+-                != 0
++            sync.flags & uapi::drm_panthor_sync_op_flags_DRM_PANTHOR_SYNC_OP_SIGNAL as u32 != 0
+         }) {
+             out_syncs.push(
+                 drm::syncobj::SyncObj::lookup_handle(file, sync.handle)?,
+@@ -367,7 +352,13 @@ pub(crate) fn group_submit(
+ 
+         tdev.with_locked_scheduler(|sched| {
+             sched.bind(tdev, group.clone())?;
+-            sched.submit(kvec![], out_syncs, group, queue_submits, file.get_client_id())
++            sched.submit(
++                kvec![],
++                out_syncs,
++                group,
++                queue_submits,
++                file.get_client_id(),
++            )
+         })?;
+ 
+         Ok(0)
+diff --git a/drivers/gpu/drm/tyr/fw/global.rs b/drivers/gpu/drm/tyr/fw/global.rs
+index f5d015177b..6d53c953d1 100644
+--- a/drivers/gpu/drm/tyr/fw/global.rs
++++ b/drivers/gpu/drm/tyr/fw/global.rs
+@@ -91,8 +91,7 @@ fn from_micro(core_clk: &Clk, timeout_us: u32) -> Result<Self> {
+             return Err(EINVAL);
+         }
+ 
+-        let mut mod_cycles =
+-            (u64::from(timeout_us) * timer_rate).div_ceil(1000000 << 10);
++        let mut mod_cycles = (u64::from(timeout_us) * timer_rate).div_ceil(1000000 << 10);
+ 
+         if mod_cycles > glb_timer_val(u32::MAX).into() {
+             pr_err!("Invalid timeout computed\n");
+@@ -236,8 +235,7 @@ pub(super) fn new(
+         iomem: Arc<Devres<IoMem>>,
+         req_wait: Arc<Wait>,
+     ) -> Result<Self> {
+-        let shared_section =
+-            Arc::pin_init(new_mutex!(shared_section), GFP_KERNEL)?;
++        let shared_section = Arc::pin_init(new_mutex!(shared_section), GFP_KERNEL)?;
+ 
+         Ok(Self {
+             state: GlobalInterfaceState::Disabled,
+@@ -255,8 +253,7 @@ pub(crate) fn enable(
+         core_clk: &Clk,
+     ) -> Result {
+         // This takes a mutex internally in clk_prepare().
+-        let poweroff_timer =
+-            TimeoutCycles::from_micro(core_clk, PWROFF_HYSTERESIS_US)?.into();
++        let poweroff_timer = TimeoutCycles::from_micro(core_clk, PWROFF_HYSTERESIS_US)?.into();
+ 
+         let control_area = SharedSectionRange {
+             shared_section: self.shared_section.clone(),
+@@ -275,32 +272,24 @@ pub(crate) fn enable(
+ 
+         let control = Control::read(&control_area)?;
+         if control.version == 0 {
+-            pr_err!(
+-                "MCU firmware version is 0. Firmware may have failed to boot\n"
+-            );
++            pr_err!("MCU firmware version is 0. Firmware may have failed to boot\n");
+             return Err(EINVAL);
+         }
+ 
+-        let mut input_area = self.shared_range(
+-            control.input_va.into(),
+-            core::mem::size_of::<Input>(),
+-        )?;
++        let mut input_area =
++            self.shared_range(control.input_va.into(), core::mem::size_of::<Input>())?;
+ 
+-        let output_area = self.shared_range(
+-            control.output_va.into(),
+-            core::mem::size_of::<Output>(),
+-        )?;
++        let output_area =
++            self.shared_range(control.output_va.into(), core::mem::size_of::<Output>())?;
+ 
+         /// The start of the CSG control area for the first CSG.
+         const CSF_GROUP_CONTROL_OFFSET: u32 = 0x1000;
+ 
+         let mut csgs: KVec<CommandStreamGroup> = kvec![];
+         for csg_idx in 0..control.group_num {
+-            let iface_offset =
+-                CSF_GROUP_CONTROL_OFFSET + (csg_idx * control.group_stride);
++            let iface_offset = CSF_GROUP_CONTROL_OFFSET + (csg_idx * control.group_stride);
+ 
+-            let csg =
+-                CommandStreamGroup::init(self, iface_offset, csg_idx as usize)?;
++            let csg = CommandStreamGroup::init(self, iface_offset, csg_idx as usize)?;
+ 
+             if let Some(first) = csgs.first() {
+                 if !first.is_identical(&csg)? {
+@@ -328,8 +317,7 @@ pub(crate) fn enable(
+ 
+         // Setup timers.
+         input.poweroff_timer = poweroff_timer;
+-        input.progress_timer =
+-            PROGRESS_TIMEOUT_CYCLES >> PROGRESS_TIMEOUT_SCALE_SHIFT;
++        input.progress_timer = PROGRESS_TIMEOUT_CYCLES >> PROGRESS_TIMEOUT_SCALE_SHIFT;
+         input.idle_timer = IDLE_HYSTERESIS_US;
+ 
+         // Enable the interrupts we care about.
+@@ -349,8 +337,7 @@ pub(crate) fn enable(
+         );
+         req.update_reqs(GLB_IDLE_EN, GLB_IDLE_EN)?;
+ 
+-        let reqs =
+-            GLB_CFG_ALLOC_EN | GLB_CFG_POWEROFF_TIMER | GLB_CFG_PROGRESS_TIMER;
++        let reqs = GLB_CFG_ALLOC_EN | GLB_CFG_POWEROFF_TIMER | GLB_CFG_PROGRESS_TIMER;
+         req.toggle_reqs(reqs)?;
+ 
+         self.ring_glb_doorbell()?;
+@@ -374,38 +361,25 @@ pub(crate) fn ring_glb_doorbell(&self) -> Result {
+         Doorbell::new(CSF_GLB_DOORBELL_ID).write(&self.iomem, 1)
+     }
+ 
+-    pub(crate) fn csg(
+-        &mut self,
+-        csg_idx: usize,
+-    ) -> Option<&CommandStreamGroup> {
++    pub(crate) fn csg(&mut self, csg_idx: usize) -> Option<&CommandStreamGroup> {
+         match &self.state {
+             GlobalInterfaceState::Disabled => None,
+-            GlobalInterfaceState::Enabled(EnabledGlobalInterface {
+-                csgs,
+-                ..
+-            }) => csgs.get(csg_idx),
++            GlobalInterfaceState::Enabled(EnabledGlobalInterface { csgs, .. }) => csgs.get(csg_idx),
+         }
+     }
+ 
+-    pub(crate) fn csg_mut(
+-        &mut self,
+-        csg_idx: usize,
+-    ) -> Option<&mut CommandStreamGroup> {
++    pub(crate) fn csg_mut(&mut self, csg_idx: usize) -> Option<&mut CommandStreamGroup> {
+         match &mut self.state {
+             GlobalInterfaceState::Disabled => None,
+-            GlobalInterfaceState::Enabled(EnabledGlobalInterface {
+-                csgs,
+-                ..
+-            }) => csgs.get_mut(csg_idx),
++            GlobalInterfaceState::Enabled(EnabledGlobalInterface { csgs, .. }) => {
++                csgs.get_mut(csg_idx)
++            }
+         }
+     }
+ 
+     pub(crate) fn arm_watchdog(&self, tdev: &TyrDevice) -> Result {
+         tdev.reset_wq
+-            .enqueue_delayed::<_, 0>(
+-                tdev.deref().clone(),
+-                PING_INTERVAL_MS as usize,
+-            )
++            .enqueue_delayed::<_, 0>(tdev.deref().clone(), PING_INTERVAL_MS as usize)
+             .map_err(|_| EINVAL)
+     }
+ 
+@@ -413,9 +387,7 @@ pub(crate) fn ping(&mut self) -> Result {
+         let glb_iface = match self.state {
+             GlobalInterfaceState::Enabled(ref enabled) => enabled,
+             GlobalInterfaceState::Disabled => {
+-                pr_err!(
+-                    "Trying to ping CSF but the global interface is down\n"
+-                );
++                pr_err!("Trying to ping CSF but the global interface is down\n");
+                 return Ok(());
+             }
+         };
+@@ -442,11 +414,7 @@ pub(crate) fn ping(&mut self) -> Result {
+     /// area.
+     ///
+     /// The result is an offset that can be safely dereferenced by the CPU.
+-    pub(super) fn shared_range(
+-        &mut self,
+-        mcu_va: u64,
+-        size: usize,
+-    ) -> Result<SharedSectionRange> {
++    pub(super) fn shared_range(&mut self, mcu_va: u64, size: usize) -> Result<SharedSectionRange> {
+         let shared_mem_start = u64::from(self.shared_section.lock().va.start);
+         let shared_mem_end = u64::from(self.shared_section.lock().va.end);
+ 
+@@ -463,11 +431,7 @@ pub(super) fn shared_range(
+     }
+ 
+     /// Set the CSG state.
+-    pub(crate) fn set_csg_state(
+-        &mut self,
+-        csg_idx: usize,
+-        state: csg::GroupState,
+-    ) -> Result {
++    pub(crate) fn set_csg_state(&mut self, csg_idx: usize, state: csg::GroupState) -> Result {
+         let glb = self.state.enabled_mut()?;
+         let csg_iface = glb.csgs.get_mut(csg_idx).ok_or(EINVAL)?;
+ 
+@@ -517,10 +481,7 @@ fn run(this: Self::Pointer) {
+         let res = this.fw.with_locked_global_iface(|glb| {
+             glb.ping()?;
+             this.reset_wq
+-                .enqueue_delayed::<_, 0>(
+-                    this.clone(),
+-                    PING_INTERVAL_MS as usize,
+-                )
++                .enqueue_delayed::<_, 0>(this.clone(), PING_INTERVAL_MS as usize)
+                 .map_err(|_| EINVAL)
+         });
+ 
+diff --git a/drivers/gpu/drm/tyr/gem.rs b/drivers/gpu/drm/tyr/gem.rs
+index 174be3dda9..0b158d1ffc 100644
+--- a/drivers/gpu/drm/tyr/gem.rs
++++ b/drivers/gpu/drm/tyr/gem.rs
+@@ -6,7 +6,7 @@
+ use crate::driver::TyrDriver;
+ use crate::file::DrmFile;
+ use crate::mmu::vm;
+-use crate::mmu::vm::{Vm, LiveRange};
++use crate::mmu::vm::{LiveRange, Vm};
+ use kernel::devres::Devres;
+ use kernel::drm::gem::shmem;
+ use kernel::drm::gem::BaseObject;
+@@ -51,11 +51,7 @@ impl gem::DriverObject for DriverObject {
+     type Object = gem::shmem::Object<Self>;
+     type Args = GemArgs;
+ 
+-    fn new(
+-        dev: &TyrDevice,
+-        _size: usize,
+-        args: Self::Args,
+-    ) -> impl PinInit<Self, Error> {
++    fn new(dev: &TyrDevice, _size: usize, args: Self::Args) -> impl PinInit<Self, Error> {
+         dev_dbg!(dev.as_ref(), "DriverObject::new\n");
+         try_pin_init!(DriverObject {
+             ty: args.ty,
+@@ -109,11 +105,7 @@ pub(crate) fn kernel_va(&self) -> Option<Range<u64>> {
+ type ObjectConfig<'a> = shmem::ObjectConfig<'a, DriverObject>;
+ 
+ /// Create a new DRM GEM object.
+-pub(crate) fn new_object(
+-    dev: &TyrDevice,
+-    size: usize,
+-    flags: u32,
+-) -> Result<ObjectRef> {
++pub(crate) fn new_object(dev: &TyrDevice, size: usize, flags: u32) -> Result<ObjectRef> {
+     let aligned_size = size.next_multiple_of(1 << 12);
+ 
+     if size == 0 || size > aligned_size {
+@@ -136,13 +128,10 @@ pub(crate) fn new_object(
+     // TODO: This is really bad but at this point seems to be the only way:
+     // to be refactored
+     // SAFETY: We are the only owners at this point
+-    let mut obj =
+-        ARef::<kernel::drm::gem::shmem::Object<DriverObject>>::into_raw(gem);
++    let mut obj = ARef::<kernel::drm::gem::shmem::Object<DriverObject>>::into_raw(gem);
+     unsafe { obj.as_mut().flags = flags };
+ 
+-    let gem = unsafe {
+-        ARef::<kernel::drm::gem::shmem::Object<DriverObject>>::from_raw(obj)
+-    };
++    let gem = unsafe { ARef::<kernel::drm::gem::shmem::Object<DriverObject>>::from_raw(obj) };
+ 
+     Ok(ObjectRef::new(gem))
+ }
+diff --git a/drivers/gpu/drm/tyr/mmu.rs b/drivers/gpu/drm/tyr/mmu.rs
+index 23c69778e2..5e910a19c2 100644
+--- a/drivers/gpu/drm/tyr/mmu.rs
++++ b/drivers/gpu/drm/tyr/mmu.rs
+@@ -55,19 +55,14 @@ pub(crate) fn create_vm(
+         auto_kernel_va: Range<u64>,
+         /* coherent: bool, */
+     ) -> Result<Arc<Mutex<Vm>>> {
+-        let vm =
+-            Vm::create(tdev, pdev, for_mcu, gpu_info, layout, auto_kernel_va)?;
++        let vm = Vm::create(tdev, pdev, for_mcu, gpu_info, layout, auto_kernel_va)?;
+ 
+         let vm = Arc::pin_init(new_mutex!(vm), GFP_KERNEL)?;
+         self.vms.push(vm.clone(), GFP_KERNEL)?;
+         Ok(vm)
+     }
+ 
+-    fn flush_range(
+-        iomem: &Devres<IoMem>,
+-        as_nr: usize,
+-        range: Range<u64>,
+-    ) -> Result {
++    fn flush_range(iomem: &Devres<IoMem>, as_nr: usize, range: Range<u64>) -> Result {
+         Self::do_as_command(iomem, as_nr, AS_COMMAND_FLUSH_PT, range)
+     }
+ 
+@@ -174,12 +169,8 @@ fn enable_as(
+ 
+         let op = || as_status(as_nr)?.read(iomem);
+         let cond = |status: &u32| -> bool { *status & AS_STATUS_ACTIVE == 0 };
+-        let _ = io::poll::read_poll_timeout(
+-            op,
+-            cond,
+-            Delta::from_millis(0),
+-            Delta::from_micros(200),
+-        )?;
++        let _ =
++            io::poll::read_poll_timeout(op, cond, Delta::from_millis(0), Delta::from_micros(200))?;
+ 
+         as_command(as_nr)?.write(iomem, AS_COMMAND_UPDATE)?;
+ 
+@@ -200,12 +191,8 @@ fn disable_as(iomem: &Devres<IoMem>, as_nr: usize) -> Result {
+ 
+         let op = || as_status(as_nr)?.read(iomem);
+         let cond = |status: &u32| -> bool { *status & AS_STATUS_ACTIVE == 0 };
+-        let _ = io::poll::read_poll_timeout(
+-            op,
+-            cond,
+-            Delta::from_millis(0),
+-            Delta::from_micros(200),
+-        )?;
++        let _ =
++            io::poll::read_poll_timeout(op, cond, Delta::from_millis(0), Delta::from_micros(200))?;
+ 
+         as_command(as_nr)?.write(iomem, AS_COMMAND_UPDATE)?;
+ 
+diff --git a/drivers/gpu/drm/tyr/mmu/as_lock.rs b/drivers/gpu/drm/tyr/mmu/as_lock.rs
+index b85b87cc31..b691e962b5 100644
+--- a/drivers/gpu/drm/tyr/mmu/as_lock.rs
++++ b/drivers/gpu/drm/tyr/mmu/as_lock.rs
+@@ -43,8 +43,8 @@ pub(super) fn lock_region(
+ 
+         // Mask off the low bits of region.start, which would be ignored by the
+         // hardware anyways.
+-        let region_start = region.start
+-            & genmask_checked_u64(region_width as u32..=63).ok_or(EINVAL)?;
++        let region_start =
++            region.start & genmask_checked_u64(region_width as u32..=63).ok_or(EINVAL)?;
+ 
+         let region = (region_width as u64) | region_start;
+ 
+@@ -69,8 +69,7 @@ fn drop(&mut self) {
+                     pr_err!("MMU is busy for AS{}: {:?}\n", self.as_nr, err);
+                     return;
+                 }
+-                if let Err(err) = as_cmd.write(self.iomem, AS_COMMAND_FLUSH_PT)
+-                {
++                if let Err(err) = as_cmd.write(self.iomem, AS_COMMAND_FLUSH_PT) {
+                     pr_err!(
+                         "Failed to flush page tables for AS{}: {:?}\n",
+                         self.as_nr,
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index 013a8dfff8..cb013814aa 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -51,7 +51,7 @@
+ pub(crate) mod pool;
+ 
+ mod range;
+-pub(crate) use self::range::{RangeAlloc, LiveRange};
++pub(crate) use self::range::{LiveRange, RangeAlloc};
+ 
+ // TODO: we need *all* of these in kernel::bindings.
+ const SZ_4G: u64 = 4 * kernel::bindings::SZ_1G as u64;
+@@ -111,7 +111,8 @@ pub(super) fn create(
+ 
+         let va_range = if for_mcu { 0..SZ_4G } else { 0..full_va_range };
+ 
+-        let kernel_mm = range::RangeAlloc::new(auto_kernel_va.start, auto_kernel_va.end, GFP_KERNEL)?;
++        let kernel_mm =
++            range::RangeAlloc::new(auto_kernel_va.start, auto_kernel_va.end, GFP_KERNEL)?;
+ 
+         let page_table = ARM64LPAES1::new(
+             pdev.as_ref(),
+@@ -154,10 +155,7 @@ pub(crate) fn alloc_kernel_range(&mut self, va: KernelVaPlacement) -> Result<Liv
+         match va {
+             KernelVaPlacement::Auto { size } => unsafe { self.gpuvm.as_inner_mut() }
+                 .kernel_mm
+-                .allocate(
+-                    size,
+-                    GFP_KERNEL
+-                ),
++                .allocate(size, GFP_KERNEL),
+             KernelVaPlacement::At(va) => unsafe { self.gpuvm.as_inner_mut() }
+                 .kernel_mm
+                 .insert(va.start, va.end, GFP_KERNEL),
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs b/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
+index 35884ee2e3..a686338948 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
+@@ -110,15 +110,12 @@ fn unmap_pages(
+             let pgsize = 4096;
+             let pgcount = (size - total_unmapped).div_ceil(pgsize);
+ 
+-            let unmapped_sz = self.page_table.unmap_pages(
+-                iova.start as usize,
+-                pgsize as usize,
+-                pgcount as usize,
+-            );
++            let unmapped_sz =
++                self.page_table
++                    .unmap_pages(iova.start as usize, pgsize as usize, pgcount as usize);
+ 
+             if unmapped_sz as u64 != pgsize * pgcount {
+-                let range = iova.start
+-                    ..iova.start + total_unmapped + unmapped_sz as u64;
++                let range = iova.start..iova.start + total_unmapped + unmapped_sz as u64;
+ 
+                 pr_err!(
+                     "AS ({:#?}): failed to unmap range {:#x} - {:#x}, unmapped only {:#x} bytes\n",
+@@ -226,10 +223,7 @@ fn step_map(
+         gpuvm.insert_va(op, gpuva).map_err(|_| EINVAL)?;
+         gpuvm.find_va(op.range(), |gpuvm, gpuva| {
+             let gpuva = gpuva.ok_or(EINVAL)?;
+-            gpuvm.link_va(
+-                gpuva,
+-                ctx.vm_bo.as_ref().expect("step_map with no BO"),
+-            )?;
++            gpuvm.link_va(gpuva, ctx.vm_bo.as_ref().expect("step_map with no BO"))?;
+             Ok(())
+         })?;
+ 
+@@ -251,8 +245,7 @@ fn step_unmap(
+         gpuvm.unmap_pages(&ctx.iomem, ctx.vm_as_nr, iova)?;
+ 
+         gpuvm.find_va(va.range(), |gpuvm, gpuva| {
+-            let removed =
+-                gpuvm.remove_va(gpuva.unwrap()).map_err(|_| EINVAL)?;
++            let removed = gpuvm.remove_va(gpuva.unwrap()).map_err(|_| EINVAL)?;
+             gpuvm.unlink_va(&removed);
+             Ok(())
+         })?;
+@@ -291,8 +284,7 @@ fn step_remap(
+ 
+         gpuvm.unmap_pages(&ctx.iomem, ctx.vm_as_nr, unmap_range)?;
+         gpuvm.find_va(op.unmap().va().unwrap().range(), |gpuvm, gpuva| {
+-            let removed_va =
+-                gpuvm.remove_va(gpuva.unwrap()).map_err(|_| EINVAL)?;
++            let removed_va = gpuvm.remove_va(gpuva.unwrap()).map_err(|_| EINVAL)?;
+             gpuvm.unlink_va(&removed_va);
+             Ok(())
+         })?;
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/range.rs b/drivers/gpu/drm/tyr/mmu/vm/range.rs
+index ab1b229180..8ac6bf8c5b 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/range.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/range.rs
+@@ -105,9 +105,7 @@ pub(crate) fn insert(&self, start: u64, end: u64, gfp: Flags) -> Result<LiveRang
+         #[cfg(target_pointer_width = "32")]
+         {
+             if let Some(range) = self.inner.maple_range(start, end) {
+-                self.inner
+-                    .maple
+-                    .insert_range(range, (), gfp)?;
++                self.inner.maple.insert_range(range, (), gfp)?;
+             }
+         }
+ 
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index a25eb3bbf4..16b3e8d8ea 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -148,8 +148,7 @@ pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+         let wq = OwnedQueue::new(c_str!("tyr-csf-sched"), WqFlags::UNBOUND, 0)?;
+ 
+         Ok(Self {
+-            runnable_groups: [const { KVec::new() };
+-                Priority::num_priorities()],
++            runnable_groups: [const { KVec::new() }; Priority::num_priorities()],
+             idle_groups: [const { KVec::new() }; Priority::num_priorities()],
+             waiting_groups: [const { KVec::new() }; Priority::num_priorities()],
+             unsynced_groups: KVec::new(),
+@@ -196,9 +195,7 @@ pub(crate) fn bind_group(
+         let gpu_info = &tdev.gpu_info;
+         let iomem = &tdev.iomem;
+ 
+-        tdev.with_locked_mmu(|mmu| {
+-            mmu.bind_vm(group.vm.clone(), gpu_info, iomem)
+-        })?;
++        tdev.with_locked_mmu(|mmu| mmu.bind_vm(group.vm.clone(), gpu_info, iomem))?;
+ 
+         self.csg_slots[csg_idx] = Some(CommandStreamGroupSlot {
+             group: group.clone(),
+@@ -273,8 +270,7 @@ pub(crate) fn program_csg_slot(
+                     let cs_iface = csg_iface.cs_mut(cs_idx).ok_or(EINVAL)?;
+ 
+                     self.program_cs_slot(queue, cs_iface)?;
+-                    queue_mask |=
+-                        checked_bit_u32(cs_idx as u32).ok_or(EINVAL)?;
++                    queue_mask |= checked_bit_u32(cs_idx as u32).ok_or(EINVAL)?;
+                 }
+ 
+                 Ok(queue_mask)
+@@ -299,8 +295,7 @@ pub(crate) fn program_csg_slot(
+         input.csg_config = as_nr;
+ 
+         input.suspend_buf = group.suspend_buf.kernel_va().ok_or(EINVAL)?.start;
+-        input.protm_suspend_buf =
+-            group.protm_suspend_buf.kernel_va().ok_or(EINVAL)?.start;
++        input.protm_suspend_buf = group.protm_suspend_buf.kernel_va().ok_or(EINVAL)?.start;
+ 
+         input.ack_irq_mask = u32::MAX;
+ 
+@@ -321,11 +316,7 @@ pub(crate) fn program_csg_slot(
+     ///
+     /// Queues are alloted slots when their group is itself programmed into a
+     /// CSG slot.
+-    fn program_cs_slot(
+-        &mut self,
+-        queue: &Queue,
+-        cs_iface: &mut CommandStream,
+-    ) -> Result {
++    fn program_cs_slot(&mut self, queue: &Queue, cs_iface: &mut CommandStream) -> Result {
+         let doorbell_id = queue.doorbell_id.ok_or(EINVAL)?;
+         let mut cs_input = cs_iface.read_input()?;
+ 
+@@ -363,8 +354,8 @@ pub(crate) fn issue_dummy_instr(&mut self, group: Arc<Group>, tdev: &TyrDevice)
+         let iomem = tdev.iomem.clone();
+ 
+         use crate::mmu::vm::map_flags;
+-        let flags = map_flags::Flags::from(map_flags::NOEXEC)
+-            | map_flags::Flags::from(map_flags::UNCACHED);
++        let flags =
++            map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED);
+ 
+         let mut debug_gem = gem::new_kernel_object(
+             tdev,
+@@ -398,11 +389,8 @@ pub(crate) fn issue_dummy_instr(&mut self, group: Arc<Group>, tdev: &TyrDevice)
+         let src0 = 64; // to the address pointed to by [r64; r65]
+         let offset = 0; // and this offset
+ 
+-        let store_multiple: u64 = opcode << 56
+-            | sr << 48
+-            | src0 << 40
+-            | register_bitmap << 16
+-            | offset;
++        let store_multiple: u64 =
++            opcode << 56 | sr << 48 | src0 << 40 | register_bitmap << 16 | offset;
+ 
+         instrs.extend_from_slice(&store_multiple.to_le_bytes(), GFP_KERNEL)?;
+ 
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index 1a9eecb041..bf45ac759b 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -7,7 +7,7 @@
+ 
+ use core::ops::Deref;
+ 
+-use kernel::dma_fence::{FenceOps,RawDmaFence};
++use kernel::dma_fence::{FenceOps, RawDmaFence};
+ use kernel::impl_has_work;
+ use kernel::prelude::*;
+ use kernel::sync::Arc;
+@@ -66,8 +66,7 @@ fn process_csg_irq(
+         let mut input = csg.read_input()?;
+         let output = csg.read_output()?;
+ 
+-        let csg_events =
+-            (input.req ^ output.ack) & csg::constants::CSG_EVT_MASK;
++        let csg_events = (input.req ^ output.ack) & csg::constants::CSG_EVT_MASK;
+ 
+         // // We may have no pending CSG/CS interrupts to process.
+         if input.req == output.ack && output.irq_req == input.irq_ack {
+@@ -138,8 +137,8 @@ fn process_cs_irq(
+ 
+         let cs_events = (input.req ^ output.ack) & cs::constants::CS_EVT_MASK;
+ 
+-        let faulty = cs_events & cs::constants::CS_FATAL != 0
+-            || cs_events & cs::constants::CS_FAULT != 0;
++        let faulty =
++            cs_events & cs::constants::CS_FATAL != 0 || cs_events & cs::constants::CS_FAULT != 0;
+ 
+         if cs_events & cs::constants::CS_FATAL != 0 {
+             cs.decode_fatal()?;
+@@ -162,9 +161,7 @@ fn process_cs_irq(
+                 .ok_or(EINVAL)?
+                 .group
+                 .with_locked_inner(|inner| {
+-                    for job_fence in
+-                        &inner.queues[cs_id as usize].in_flight_jobs
+-                    {
++                    for job_fence in &inner.queues[cs_id as usize].in_flight_jobs {
+                         // Just mark everything in flight as failed.
+                         //
+                         // This is not exactly the right thing to do, but while
+@@ -205,10 +202,8 @@ fn update_group(&mut self, group: Arc<Group>, data: &TyrData) -> Result {
+         // TODO: we cannot sleep in the signalling path.
+         group.with_locked_inner(|inner| {
+             for (queue_idx, queue) in inner.queues.iter_mut().enumerate() {
+-                let sync_offset =
+-                    queue_idx * core::mem::size_of::<syncs::SyncObj64b>();
+-                let sync_obj =
+-                    syncs::SyncObj64b::read(&mut inner.syncobjs, sync_offset)?;
++                let sync_offset = queue_idx * core::mem::size_of::<syncs::SyncObj64b>();
++                let sync_obj = syncs::SyncObj64b::read(&mut inner.syncobjs, sync_offset)?;
+ 
+                 // TODO: this has to be moved somewhere else. It should probably
+                 // be in TyrData, or anywhere else we can easily access from
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index 65ecdb6171..972fb1b180 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -73,7 +73,7 @@ pub(crate) fn submit(
+         group: Arc<Group>,
+         queue_submit: QueueSubmit,
+         prepared_vm: &PreparedVm<'_>,
+-        client_id: u64
++        client_id: u64,
+     ) -> Result<UserFence<job::Fence>> {
+         let queue = self
+             .queues
+@@ -180,12 +180,9 @@ pub(super) fn create(
+             return Err(EINVAL);
+         }
+ 
+-        if group_args.compute_core_mask.count_ones()
+-            > group_args.max_compute_cores as u32
+-            || group_args.fragment_core_mask.count_ones()
+-                > group_args.max_fragment_cores as u32
+-            || group_args.tiler_core_mask.count_ones()
+-                > group_args.max_tiler_cores as u32
++        if group_args.compute_core_mask.count_ones() > group_args.max_compute_cores as u32
++            || group_args.fragment_core_mask.count_ones() > group_args.max_fragment_cores as u32
++            || group_args.tiler_core_mask.count_ones() > group_args.max_tiler_cores as u32
+         {
+             pr_err!("group_create: asking for more cores than the maximum allowed for the group");
+             return Err(EINVAL);
+@@ -197,28 +194,24 @@ pub(super) fn create(
+             .get_vm(group_args.vm_id as usize)
+             .ok_or(EINVAL)?;
+ 
+-        let (suspend_buf_size, protm_suspend_buf_size) = fw
+-            .with_locked_global_iface(|glb_iface| {
++        let (suspend_buf_size, protm_suspend_buf_size) =
++            fw.with_locked_global_iface(|glb_iface| {
+                 let csg = glb_iface.csg(0).ok_or(EINVAL)?;
+                 let control = csg.read_control()?;
+ 
+                 Ok((control.suspend_size, control.protm_suspend_size))
+             })?;
+ 
+-        let suspend_buf =
+-            fw.alloc_suspend_buf(tdev, suspend_buf_size as usize)?;
+-        let protm_suspend_buf =
+-            fw.alloc_suspend_buf(tdev, protm_suspend_buf_size as usize)?;
++        let suspend_buf = fw.alloc_suspend_buf(tdev, suspend_buf_size as usize)?;
++        let protm_suspend_buf = fw.alloc_suspend_buf(tdev, protm_suspend_buf_size as usize)?;
+ 
+-        let num_syncs = group_args.queues.count as usize
+-            * core::mem::size_of::<SyncObj64b>();
++        let num_syncs = group_args.queues.count as usize * core::mem::size_of::<SyncObj64b>();
+         let mut syncobjs = gem::new_kernel_object(
+             tdev,
+             tdev.iomem.clone(),
+             vm.clone(),
+             gem::KernelVaPlacement::Auto { size: num_syncs },
+-            map_flags::Flags::from(map_flags::NOEXEC)
+-                | map_flags::Flags::from(map_flags::UNCACHED),
++            map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED),
+         )?;
+ 
+         let vmap = syncobjs.vmap()?;
+@@ -230,8 +223,7 @@ pub(super) fn create(
+             queues.push(queue, GFP_KERNEL)?;
+         }
+ 
+-        let idle_queues =
+-            genmask_checked_u32(0..=queues.len() as u32 - 1).ok_or(EINVAL)?;
++        let idle_queues = genmask_checked_u32(0..=queues.len() as u32 - 1).ok_or(EINVAL)?;
+         let priority = group_args.priority.try_into()?;
+ 
+         Arc::pin_init(
+@@ -290,7 +282,7 @@ pub(super) fn submit(
+         in_syncs: KVec<SyncObj<TyrDriver>>,
+         out_syncs: KVec<SyncObj<TyrDriver>>,
+         queue_submits: KVec<QueueSubmit>,
+-        client_id: u64
++        client_id: u64,
+     ) -> Result<KVec<UserFence<job::Fence>>> {
+         if self.vm.lock().address_space().is_none() {
+             pr_err!("group_submit: invalid address space");
+@@ -368,8 +360,7 @@ pub(crate) struct Pool {
+ 
+ impl Pool {
+     pub(crate) fn create() -> Result<Self> {
+-        let xa =
+-            KBox::pin_init(XArray::new(xarray::AllocKind::Alloc1), GFP_KERNEL)?;
++        let xa = KBox::pin_init(XArray::new(xarray::AllocKind::Alloc1), GFP_KERNEL)?;
+ 
+         Ok(Self {
+             xa,
+diff --git a/drivers/gpu/drm/tyr/sched/queue.rs b/drivers/gpu/drm/tyr/sched/queue.rs
+index 43e5ee0a28..6091493aef 100644
+--- a/drivers/gpu/drm/tyr/sched/queue.rs
++++ b/drivers/gpu/drm/tyr/sched/queue.rs
+@@ -81,10 +81,7 @@ pub(crate) fn new(
+         // ugh..
+         let queue_args = &queue_args.0;
+ 
+-        if queue_args.pad[0] != 0
+-            || queue_args.pad[1] != 0
+-            || queue_args.pad[2] != 0
+-        {
++        if queue_args.pad[0] != 0 || queue_args.pad[1] != 0 || queue_args.pad[2] != 0 {
+             return Err(EINVAL);
+         }
+ 
+@@ -92,10 +89,7 @@ pub(crate) fn new(
+             || queue_args.ringbuf_size > SZ_64K as u32
+             || !queue_args.ringbuf_size.is_power_of_two()
+         {
+-            pr_err!(
+-                "Invalid ring buffer size: {:#x}\n",
+-                queue_args.ringbuf_size
+-            );
++            pr_err!("Invalid ring buffer size: {:#x}\n", queue_args.ringbuf_size);
+             return Err(EINVAL);
+         }
+ 
+@@ -105,8 +99,7 @@ pub(crate) fn new(
+         }
+ 
+         let priority = queue_args.priority;
+-        let credit_limit =
+-            queue_args.ringbuf_size / core::mem::size_of::<u64>() as u32;
++        let credit_limit = queue_args.ringbuf_size / core::mem::size_of::<u64>() as u32;
+ 
+         let scheduler = Scheduler::new(
+             tdev.as_ref(),
+@@ -127,8 +120,7 @@ pub(crate) fn new(
+             gem::KernelVaPlacement::Auto {
+                 size: queue_args.ringbuf_size as usize,
+             },
+-            map_flags::Flags::from(map_flags::NOEXEC)
+-                | map_flags::Flags::from(map_flags::UNCACHED),
++            map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED),
+         )?;
+ 
+         let mem = tdev.fw.alloc_queue_mem(tdev)?;
+@@ -202,7 +194,7 @@ pub(crate) fn submit(
+         sync_addr: u64,
+         queue_submit: QueueSubmit,
+         _: &PreparedVm<'_>,
+-        client_id: u64
++        client_id: u64,
+     ) -> Result<UserFence<job::Fence>> {
+         let fence: UserFence<_> = self
+             .fence_ctx
+diff --git a/drivers/gpu/drm/tyr/wait.rs b/drivers/gpu/drm/tyr/wait.rs
+index e20b74cb57..a18f10d95d 100644
+--- a/drivers/gpu/drm/tyr/wait.rs
++++ b/drivers/gpu/drm/tyr/wait.rs
+@@ -151,8 +151,7 @@ pub(crate) fn wait_interruptible_timeout<F>(
+                     match on_woken(&mut guard)? {
+                         WaitResult::Ok => return Ok(()),
+                         WaitResult::Retry => {
+-                            remaining_time =
+-                                remaining_time.saturating_sub(jiffies)
++                            remaining_time = remaining_time.saturating_sub(jiffies)
+                         }
+                     }
+                 }
+@@ -163,9 +162,7 @@ pub(crate) fn wait_interruptible_timeout<F>(
+                     }
+                     return Err(ETIMEDOUT);
+                 }
+-                kernel::sync::CondVarTimeoutResult::Signal { .. } => {
+-                    return Err(ERESTARTSYS)
+-                }
++                kernel::sync::CondVarTimeoutResult::Signal { .. } => return Err(ERESTARTSYS),
+             }
+         }
+     }
+-- 
+2.51.0
+

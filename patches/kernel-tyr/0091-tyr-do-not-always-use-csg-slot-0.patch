@@ -1,0 +1,69 @@
+From 340f9f1b8cd889555ca2b49f521ccb79aa7b3fa6 Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Thu, 19 Jun 2025 11:45:34 +0000
+Subject: [PATCH 091/161] tyr: do not always use csg slot 0
+
+This allows you to run the panthor_group igt test more than once. That
+said, as csg slots are still not released, you cannot run it more than
+32 times.
+
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/tyr/file.rs  |  2 +-
+ drivers/gpu/drm/tyr/sched.rs | 15 ++++++++-------
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index b4aa2b3434..99ecd63b94 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -366,7 +366,7 @@ pub(crate) fn group_submit(
+             .ok_or(EINVAL)?;
+ 
+         tdev.with_locked_scheduler(|sched| {
+-            sched.bind0(tdev, group.clone())?;
++            sched.bind(tdev, group.clone())?;
+             sched.submit(kvec![], out_syncs, group, queue_submits, file.get_client_id())
+         })?;
+ 
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index d92bde6dd4..43f8c724b0 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -311,8 +311,8 @@ pub(crate) fn program_csg_slot(
+             let db_req = csg_iface.doobell_request()?;
+             db_req.toggle_reqs(queue_mask)?;
+ 
+-            glb_iface.set_csg_state(0, csg::GroupState::Start)?;
+-            glb_iface.ring_csg_doorbell(0)
++            glb_iface.set_csg_state(csg_idx, csg::GroupState::Start)?;
++            glb_iface.ring_csg_doorbell(csg_idx)
+         })
+     }
+ 
+@@ -344,16 +344,17 @@ fn program_cs_slot(
+         cs_iface.set_state(StreamState::Start)
+     }
+ 
+-    // TODO: This is here just for debug purposes. Remove this soon.
+-    pub(crate) fn bind0(&mut self, tdev: &TyrDevice, group: Arc<Group>) -> Result {
+-        self.bind_group(tdev, group, 0)?;
+-        self.program_csg_slot(tdev, 0, Priority::Low)
++    pub(crate) fn bind(&mut self, tdev: &TyrDevice, group: Arc<Group>) -> Result {
++        let csg_idx = self.csg_slots.iter().position(|slot| slot.is_none()).ok_or(EBUSY)?;
++        pr_warn!("Using csg slot {csg_idx}\n");
++        self.bind_group(tdev, group, csg_idx)?;
++        self.program_csg_slot(tdev, csg_idx, Priority::Low)
+     }
+ 
+     // place a dummy instruction in the first CS for the given group and kick
+     // it, just to make sure the ringbuf code is working.
+     pub(crate) fn issue_dummy_instr(&mut self, group: Arc<Group>, tdev: &TyrDevice) -> Result {
+-        self.bind0(tdev, group.clone())?;
++        self.bind(tdev, group.clone())?;
+ 
+         let iomem = tdev.iomem.clone();
+ 
+-- 
+2.51.0
+

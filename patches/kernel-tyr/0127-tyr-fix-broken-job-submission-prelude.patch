@@ -1,0 +1,54 @@
+From c6ad4084dc9b5176f1bc8b23fa088716e54ca570 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 10:38:32 -0300
+Subject: [PATCH 127/161] tyr: fix broken job submission prelude
+
+We need to add additional instructions before jumping to and from the
+user CS. Notably, there were two issues here:
+
+1. We need to wait for FLUSH_CACHES2 to complete using a WAIT(0) call.
+2. The padding to the cache-line boundary was broken, which would make
+the whole thing not work.
+
+Fix these.
+---
+ drivers/gpu/drm/tyr/sched/job.rs | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/job.rs b/drivers/gpu/drm/tyr/sched/job.rs
+index bbd77a69d4..1cf85973ac 100644
+--- a/drivers/gpu/drm/tyr/sched/job.rs
++++ b/drivers/gpu/drm/tyr/sched/job.rs
+@@ -106,6 +106,9 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+         let cs_size_regnum = val_reg;
+         let mov_cs_size: u64 = opcode << 56 | cs_size_regnum << 48 | u64::from(job.stream_size);
+ 
++        let opcode = 3;
++        let wait0: u64 = opcode << 56 | (1 << 16); // WAIT(0)
++
+         let opcode = 32; // CALL
+         let call: u64 = opcode << 56 | cs_start_regnum << 40 | cs_size_regnum << 32;
+ 
+@@ -147,6 +150,7 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+         instrs.extend_from_slice(&flush_cache.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&mov_cs_start.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&mov_cs_size.to_le_bytes(), GFP_KERNEL)?;
++        instrs.extend_from_slice(&wait0.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&call.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&mov_sync_addr.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&mov_sync_val.to_le_bytes(), GFP_KERNEL)?;
+@@ -154,9 +158,9 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+         instrs.extend_from_slice(&sync_add.to_le_bytes(), GFP_KERNEL)?;
+         instrs.extend_from_slice(&error_barrier.to_le_bytes(), GFP_KERNEL)?;
+ 
+-        let pad = instrs.len().next_multiple_of(8) - instrs.len();
++        let pad = instrs.len().next_multiple_of(64) - instrs.len();
+ 
+-        // Pad until the next 8-byte boundary with NOPs to please the
++        // Pad until the next 64-byte boundary with NOPs to please the
+         // prefetcher.
+         for _ in 0..pad {
+             instrs.push(0, GFP_KERNEL)?;
+-- 
+2.51.0
+

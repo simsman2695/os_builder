@@ -1,0 +1,110 @@
+From ac47d9f31036f39421e2bf9bdc7302096ed6f3f1 Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Wed, 27 Aug 2025 13:38:37 +0000
+Subject: [PATCH 026/161] drm_gem: add mutex to drm_gem_object.gpuva
+
+There are two main ways that GPUVM might be used:
+
+* staged mode, where VM_BIND ioctls update the GPUVM immediately so that
+  the GPUVM reflects the state of the VM *including* staged changes that
+  are not yet applied to the GPU's virtual address space.
+* immediate mode, where the GPUVM state is updated during run_job(),
+  i.e., in the DMA fence signalling critical path, to ensure that the
+  GPUVM and the GPU's virtual address space has the same state at all
+  times.
+
+Currently, only Panthor uses GPUVM in immediate mode, but the Rust
+drivers Tyr and Nova will also use GPUVM in immediate mode, so it is
+worth to support both staged and immediate mode well in GPUVM. To use
+immediate mode, the GEMs gpuva list must be modified during the fence
+signalling path, which means that it must be protected by a lock that is
+fence signalling safe.
+
+For this reason, a mutex is added to struct drm_gem_object that is
+intended to achieve this purpose. Adding it directly in the GEM object
+both makes it easier to use GPUVM in immediate mode, but also makes it
+possible to take the gpuva lock from core drm code.
+
+As a follow-up, another change that should probably be made to support
+immediate mode is a mechanism to postpone cleanup of vm_bo objects, as
+dropping a vm_bo object in the fence signalling path is problematic for
+two reasons:
+
+* When using DRM_GPUVM_RESV_PROTECTED, you cannot remove the vm_bo from
+  the extobj/evicted lists during the fence signalling path.
+* Dropping a vm_bo could lead to the GEM object getting destroyed.
+  The requirement that GEM object cleanup is fence signalling safe is
+  dubious and likely to be violated in practice.
+
+Panthor already has its own custom implementation of postponing vm_bo
+cleanup.
+
+Reviewed-by: Boris Brezillon <boris.brezillon@collabora.com>
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/drm_gem.c |  2 ++
+ include/drm/drm_gem.h     | 24 ++++++++++++++++++------
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_gem.c b/drivers/gpu/drm/drm_gem.c
+index 6a44351e58..7126eb861d 100644
+--- a/drivers/gpu/drm/drm_gem.c
++++ b/drivers/gpu/drm/drm_gem.c
+@@ -187,6 +187,7 @@ void drm_gem_private_object_init(struct drm_device *dev,
+ 	kref_init(&obj->refcount);
+ 	obj->handle_count = 0;
+ 	obj->size = size;
++	mutex_init(&obj->gpuva.lock);
+ 	dma_resv_init(&obj->_resv);
+ 	if (!obj->resv)
+ 		obj->resv = &obj->_resv;
+@@ -210,6 +211,7 @@ void drm_gem_private_object_fini(struct drm_gem_object *obj)
+ 	WARN_ON(obj->dma_buf);
+ 
+ 	dma_resv_fini(&obj->_resv);
++	mutex_destroy(&obj->gpuva.lock);
+ }
+ EXPORT_SYMBOL(drm_gem_private_object_fini);
+ 
+diff --git a/include/drm/drm_gem.h b/include/drm/drm_gem.h
+index d3a7b43e2c..a995c0c1b6 100644
+--- a/include/drm/drm_gem.h
++++ b/include/drm/drm_gem.h
+@@ -398,16 +398,28 @@ struct drm_gem_object {
+ 	struct dma_resv _resv;
+ 
+ 	/**
+-	 * @gpuva:
+-	 *
+-	 * Provides the list of GPU VAs attached to this GEM object.
+-	 *
+-	 * Drivers should lock list accesses with the GEMs &dma_resv lock
+-	 * (&drm_gem_object.resv) or a custom lock if one is provided.
++	 * @gpuva: Fields used by GPUVM to manage mappings pointing to this GEM object.
+ 	 */
+ 	struct {
++		/**
++		 * @gpuva.list: list of GPUVM mappings attached to this GEM object.
++		 *
++		 * Drivers should lock list accesses with either the GEMs
++		 * &dma_resv lock (&drm_gem_object.resv) or the
++		 * &drm_gem_object.gpuva.lock mutex.
++		 */
+ 		struct list_head list;
+ 
++		/**
++		 * @gpuva.lock: lock protecting access to &drm_gem_object.gpuva.list
++		 * when the resv lock can't be used.
++		 *
++		 * Should only be used when the VM is being modified in a fence
++		 * signalling path, otherwise you should use &drm_gem_object.resv to
++		 * protect accesses to &drm_gem_object.gpuva.list.
++		 */
++		struct mutex lock;
++
+ #ifdef CONFIG_LOCKDEP
+ 		struct lockdep_map *lock_dep_map;
+ #endif
+-- 
+2.51.0
+

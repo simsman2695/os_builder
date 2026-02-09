@@ -1,0 +1,50 @@
+From 332533ccdf7e8ac440710eedc2bbaa548761422c Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Sun, 8 Jun 2025 17:43:38 -0300
+Subject: [PATCH 034/161] rust: irq: add irq module
+
+Add the IRQ module. Future patches will then introduce support for IRQ
+registrations and handlers.
+
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Tested-by: Joel Fernandes <joelagnelf@nvidia.com>
+Tested-by: Dirk Behme <dirk.behme@de.bosch.com>
+Signed-off-by: Daniel Almeida <daniel.almeida@collabora.com>
+---
+ rust/kernel/irq.rs | 11 +++++++++++
+ rust/kernel/lib.rs |  1 +
+ 2 files changed, 12 insertions(+)
+ create mode 100644 rust/kernel/irq.rs
+
+diff --git a/rust/kernel/irq.rs b/rust/kernel/irq.rs
+new file mode 100644
+index 0000000000..fae7b15eff
+--- /dev/null
++++ b/rust/kernel/irq.rs
+@@ -0,0 +1,11 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! IRQ abstractions.
++//!
++//! An IRQ is an interrupt request from a device. It is used to get the CPU's
++//! attention so it can service a hardware event in a timely manner.
++//!
++//! The current abstractions handle IRQ requests and handlers, i.e.: it allows
++//! drivers to register a handler for a given IRQ line.
++//!
++//! C header: [`include/linux/device.h`](srctree/include/linux/interrupt.h)
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index 4699dd22db..9983505555 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -93,6 +93,7 @@
+ pub mod init;
+ pub mod io;
+ pub mod ioctl;
++pub mod irq;
+ pub mod jump_label;
+ #[cfg(CONFIG_KUNIT)]
+ pub mod kunit;
+-- 
+2.51.0
+

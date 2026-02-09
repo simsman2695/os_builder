@@ -1,0 +1,285 @@
+From 34c79cf7c658145c6a3cf7bb666540d0a6bac7df Mon Sep 17 00:00:00 2001
+From: Andrew Ballance <andrewjballance@gmail.com>
+Date: Mon, 29 Sep 2025 01:05:33 -0500
+Subject: [PATCH 120/161] tyr: sched add unbind_group and sync_group_state
+
+add helper functions needed for tick.
+
+Signed-off-by: Andrew Ballance <andrewjballance@gmail.com>
+---
+ drivers/gpu/drm/tyr/fw/global/csg.rs | 30 ++++++---
+ drivers/gpu/drm/tyr/sched.rs         | 50 +++++++++++++--
+ drivers/gpu/drm/tyr/sched/events.rs  | 96 +++++++++++++++++++++++++++-
+ 3 files changed, 160 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/fw/global/csg.rs b/drivers/gpu/drm/tyr/fw/global/csg.rs
+index 3ce6a49569..59722f20a5 100644
+--- a/drivers/gpu/drm/tyr/fw/global/csg.rs
++++ b/drivers/gpu/drm/tyr/fw/global/csg.rs
+@@ -41,10 +41,10 @@ pub(crate) mod constants {
+     use kernel::bits::genmask_u32;
+ 
+     pub(crate) const CSG_STATE_MASK: u32 = genmask_u32(0..=2);
+-    const CSG_STATE_TERMINATE: u32 = 0;
+-    const CSG_STATE_START: u32 = 1;
+-    const CSG_STATE_SUSPEND: u32 = 2;
+-    const CSG_STATE_RESUME: u32 = 3;
++    pub(crate) const CSG_STATE_TERMINATE: u32 = 0;
++    pub(crate) const CSG_STATE_START: u32 = 1;
++    pub(crate) const CSG_STATE_SUSPEND: u32 = 2;
++    pub(crate) const CSG_STATE_RESUME: u32 = 3;
+ 
+     pub(crate) const CSG_ENDPOINT_CONFIG: u32 = bit_u32(4);
+     pub(crate) const CSG_STATUS_UPDATE: u32 = bit_u32(5);
+@@ -312,10 +312,24 @@ pub(crate) fn is_idle(&self) -> bool {
+ 
+ #[derive(Copy, Clone, Debug, PartialEq)]
+ pub(crate) enum GroupState {
+-    Terminate,
+-    Start,
+-    Suspend,
+-    Resume,
++    Terminate = CSG_STATE_TERMINATE as _,
++    Start = CSG_STATE_START as _,
++    Suspend = CSG_STATE_SUSPEND as _,
++    Resume = CSG_STATE_RESUME as _,
++}
++
++impl TryFrom<u32> for GroupState {
++    type Error = Error;
++
++    fn try_from(value: u32) -> Result<Self, Error> {
++        match value & CSG_STATE_MASK {
++            CSG_STATE_TERMINATE => Ok(Self::Terminate),
++            CSG_STATE_START => Ok(Self::Start),
++            CSG_STATE_SUSPEND => Ok(Self::Suspend),
++            CSG_STATE_RESUME => Ok(Self::Resume),
++            _ => Err(EINVAL),
++        }
++    }
+ }
+ 
+ /// Represents the priority levels for a Command Stream Group (CSG).
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index 8da71ac67a..62141b8c5a 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -16,6 +16,7 @@
+ use kernel::workqueue::WqFlags;
+ use queue::Queue;
+ 
++use crate::driver::TyrData;
+ use crate::driver::TyrDevice;
+ use crate::file::DrmFile;
+ use crate::file::QueueSubmit;
+@@ -174,7 +175,7 @@ pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+     /// firmware slots for execution.
+     pub(crate) fn bind_group(
+         &mut self,
+-        tdev: &TyrDevice,
++        data: &TyrData,
+         group: Arc<Group>,
+         csg_idx: usize,
+     ) -> Result {
+@@ -196,15 +197,15 @@ pub(crate) fn bind_group(
+             return Err(EINVAL);
+         }
+ 
+-        let gpu_info = &tdev.gpu_info;
+-        let iomem = &tdev.iomem;
++        let gpu_info = &data.gpu_info;
++        let iomem = &data.iomem;
+ 
+-        tdev.with_locked_mmu(|mmu| mmu.bind_vm(group.vm.clone(), gpu_info, iomem))?;
++        data.with_locked_mmu(|mmu| mmu.bind_vm(group.vm.clone(), gpu_info, iomem))?;
+ 
+         self.csg_slots[csg_idx] = Some(CommandStreamGroupSlot {
+             group: group.clone(),
+             priority: Priority::Low,
+-            idle: true,
++            idle: false,
+         });
+ 
+         group.with_locked_inner(|inner| {
+@@ -223,12 +224,47 @@ pub(crate) fn bind_group(
+         })
+     }
+ 
++    /// Unbind a group from group slot.
++    pub(crate) fn unbind_group(
++        &mut self,
++        data: &TyrData,
++        csg_idx: usize,
++    ) -> Result<CommandStreamGroupSlot> {
++        if csg_idx >= self.csg_slot_count as usize {
++            pr_err!("unbind_group: invalid group index {}", csg_idx);
++            return Err(EINVAL);
++        }
++        if self.csg_slots[csg_idx].is_none() {
++            pr_err!("unbind_group: group slot already empty");
++            return Err(EINVAL);
++        }
++
++        let slot = self.csg_slots[csg_idx].as_mut().ok_or(EINVAL)?;
++
++        data.with_locked_mmu(|mmu| {
++            mmu.unbind_vm(&slot.group.vm, &data.iomem)?;
++            Ok(())
++        })?;
++
++        slot.group.with_locked_inner(|inner| {
++            inner.csg_id = None;
++
++            for queue in &mut inner.queues {
++                queue.doorbell_id = None;
++            }
++            Ok(())
++        })?;
++
++        let slot = self.csg_slots[csg_idx].take().ok_or(EINVAL)?;
++        return Ok(slot);
++    }
++
+     /// Program a group (and its queues) into a firmware slot. This will make
+     /// the group eligible for execution from a FW perspective.
+     // TODO: this can be private
+     pub(crate) fn program_csg_slot(
+         &mut self,
+-        tdev: &TyrDevice,
++        data: &TyrData,
+         csg_idx: usize,
+         priority: Priority,
+     ) -> Result {
+@@ -253,7 +289,7 @@ pub(crate) fn program_csg_slot(
+ 
+         // let group_inner = group.inner.lock();
+ 
+-        let fw = &tdev.fw;
++        let fw = &data.fw;
+ 
+         // Controls which CSn doorbells will be rung.
+         //
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index 860c07ccc7..4c08de4b6e 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -21,6 +21,8 @@
+ use crate::fw::global::GlobalInterface;
+ use crate::fw::SharedSectionEntry;
+ use crate::regs::JOB_INT_GLOBAL_IF;
++use crate::sched::csg::GroupState;
++use crate::sched::group::State;
+ use crate::sched::Scheduler;
+ 
+ use super::group::Group;
+@@ -248,7 +250,7 @@ pub(crate) fn set_events(&mut self, tdev: &TyrDevice, events: u32) {
+         }
+     }
+ 
+-    fn update_group(&mut self, group: Arc<Group>, data: &TyrData) -> Result {
++    fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+         let mut no_in_flight_jobs = true;
+ 
+         // TODO: we need to annotate this function with the dma signalling token.
+@@ -298,6 +300,98 @@ fn mark_group_idle(&mut self, group: Arc<Group>, data: &TyrData) -> Result {
+         self.idle_groups[group.priority as usize].push(group, GFP_KERNEL)?;
+         Ok(())
+     }
++
++    /// update group at `csg_idx` as it changes from `old_state` to `new_state`.
++    fn handle_state_change(
++        &mut self,
++        new_state: State,
++        old_state: State,
++        data: &Arc<TyrData>,
++        glb_iface: &mut GlobalInterface,
++        csg_idx: usize,
++    ) -> Result {
++        self.process_csg_irq(data.clone(), glb_iface, csg_idx as _)?;
++        self.csg_slots[csg_idx]
++            .as_ref()
++            .ok_or(EINVAL)?
++            .group
++            .with_locked_inner(|inner| {
++                if new_state == State::Unknown {
++                    //TODO: schedule reset
++                }
++                if new_state == State::Suspended {
++                    // TODO: handle reg `status_blocked_reason` here
++                }
++                if old_state == State::Active {
++                    let csg_iface = glb_iface.csg_mut(csg_idx).ok_or(EINVAL)?;
++                    for (cs_idx, _) in inner.queues.iter_mut().enumerate() {
++                        let cs_iface = csg_iface.cs_mut(cs_idx).ok_or(EINVAL)?;
++                        cs_iface.set_state(crate::sched::StreamState::Stop)?;
++                    }
++                }
++                Ok(())
++            })
++    }
++
++    /// inform the firmware of the changes of the group at `csg_idx` and update the group
++    /// based on the response.
++    pub(crate) fn sync_group_state(&mut self, data: &Arc<TyrData>, csg_idx: usize) -> Result {
++        if csg_idx >= self.csg_slot_count as usize {
++            pr_err!("sync_group: invalid group index {}", csg_idx);
++            return Err(EINVAL);
++        }
++        if self.csg_slots[csg_idx].is_none() {
++            pr_err!("sync_group: group slot is empty");
++            return Err(EINVAL);
++        }
++
++        let slot = self.csg_slots[csg_idx].as_ref().ok_or(EINVAL)?;
++        let is_idle = self.csg_slots[csg_idx].as_ref().ok_or(EINVAL)?.idle;
++        let (old_state, can_run) = slot.group.with_locked_inner(|inner| {
++            Ok((inner.state, {
++                inner.state != State::Terminated
++                    && inner.state != State::Unknown
++                    && inner.destroyed == false
++                    && inner.fatal_queues == 0
++            }))
++        })?;
++
++        let update = if is_idle {
++            if can_run {
++                GroupState::Suspend
++            } else {
++                GroupState::Terminate
++            }
++        } else {
++            if old_state == State::Suspended {
++                GroupState::Resume
++            } else {
++                GroupState::Start
++            }
++        };
++
++        let fw = &data.fw;
++        fw.with_locked_global_iface(|glb_iface| {
++            glb_iface.set_csg_state(csg_idx, update)?;
++            glb_iface.ring_csg_doorbell(csg_idx)?;
++            let output = glb_iface.read_output()?;
++            let ack = output.ack;
++
++            let new_state = match GroupState::try_from(ack) {
++                Ok(GroupState::Start) => State::Active,
++                Ok(GroupState::Resume) => State::Active,
++                Ok(GroupState::Terminate) => State::Terminated,
++                Ok(GroupState::Suspend) => State::Suspended,
++                _ => State::Unknown,
++            };
++            if old_state == new_state {
++                return Ok(());
++            }
++            self.handle_state_change(new_state, old_state, data, glb_iface, csg_idx)
++        })?;
++
++        Ok(())
++    }
+ }
+ 
+ impl_has_work! {
+-- 
+2.51.0
+

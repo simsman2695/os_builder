@@ -1,0 +1,25 @@
+From dbb8ddac438d38b3f28377447d8c21c5a93839b6 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 11:14:02 -0300
+Subject: [PATCH 130/161] tyr: start fence contexts at seqno==1
+
+---
+ drivers/gpu/drm/tyr/sched/queue.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/queue.rs b/drivers/gpu/drm/tyr/sched/queue.rs
+index ddf28bba0f..473834e028 100644
+--- a/drivers/gpu/drm/tyr/sched/queue.rs
++++ b/drivers/gpu/drm/tyr/sched/queue.rs
+@@ -140,7 +140,7 @@ pub(crate) fn new(
+             output_offset: SZ_4K,
+         };
+ 
+-        let fence_ctx = FenceContexts::new(1, c_str!("tyr_fence"), None)?;
++        let fence_ctx = FenceContexts::new(1, c_str!("tyr_fence"), None, 1)?;
+ 
+         Ok(Queue {
+             scheduler,
+-- 
+2.51.0
+

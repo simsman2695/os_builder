@@ -1,0 +1,251 @@
+From 45a5f5c21c18ceb44ed7719a04725fd4947e4a74 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 18:04:19 -0300
+Subject: [PATCH 142/161] tyr: use resv_add_fence()
+
+We forgot to add our fences to the reservation like Panthor does. Do so,
+and while we're at it, do it in a way that the exec lock is hold until
+the fences are pushed.
+---
+ drivers/gpu/drm/tyr/file.rs        | 26 +++++++++++++----
+ drivers/gpu/drm/tyr/mmu/vm.rs      | 36 +++++++++++++++++++++++-
+ drivers/gpu/drm/tyr/sched/deps.rs  | 33 ++++++++++++++++------
+ drivers/gpu/drm/tyr/sched/group.rs | 45 +++++++++++++++++++-----------
+ 4 files changed, 109 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index c46025fd6a..0382f08663 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -271,14 +271,28 @@ pub(crate) fn vm_bind_async(
+             ctx.collect_signal_ops(&internal_syncs)?;
+         }
+ 
+-        // Push all VM bind jobs with dependencies
++        // Push all VM bind jobs with dependencies and update reservation objects
+         vm.with_lock_taken(|vm| {
+-            ctx.add_deps_and_push_vm_bind_jobs(&mut vm.entity)?;
++            vm.with_prepared_vm_and_entity(count as u32, |mut locked_vm, entity| {
++                let finished_fences = ctx.add_deps_and_push_vm_bind_jobs(entity)?;
++
++                // Add the finished fences to the reservation objects
++                for fence in &finished_fences {
++                    locked_vm.resv_add_fence(
++                        fence,
++                        kernel::bindings::dma_resv_usage_DMA_RESV_USAGE_BOOKKEEP,
++                        kernel::bindings::dma_resv_usage_DMA_RESV_USAGE_BOOKKEEP,
++                    );
++                }
++
++                Ok(())
++            })
++        })?;
+ 
+-            // Push all signal fences to their syncobjs
+-            ctx.push_fences();
+-            Ok(0)
+-        })
++        // Push all signal fences to their syncobjs
++        ctx.push_fences();
++
++        Ok(0)
+     }
+ 
+     pub(crate) fn vm_bind(
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index c402bbad59..a061d723e9 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -301,15 +301,49 @@ pub(crate) fn with_prepared_vm(
+ 
+         f(prepared_vm)
+     }
++
++    /// Prepare the VM and provide access to both the PreparedVm and the entity.
++    ///
++    /// This is needed to avoid borrow checker issues when we need to access
++    /// the entity while the ExecToken is held.
++    pub(crate) fn with_prepared_vm_and_entity<R>(
++        &mut self,
++        num_slots: u32,
++        f: impl FnOnce(PreparedVm<'_>, &mut Entity<VmBindJob>) -> Result<R>,
++    ) -> Result<R> {
++        let exec_token = self.gpuvm.prepare(num_slots)?;
++        let prepared_vm = PreparedVm {
++            exec_token,
++            num_slots,
++        };
++
++        f(prepared_vm, &mut self.entity)
++    }
+ }
+ 
+ /// Indicates that all the reservations are locked for the objects in a given
+ /// VM, and that `num_slots` have been reserved for fences.
+ pub(crate) struct PreparedVm<'a> {
+-    exec_token: ExecToken<'a, LockedVm>,
++    pub(crate) exec_token: ExecToken<'a, LockedVm>,
+     pub(crate) num_slots: u32,
+ }
+ 
++impl<'a> PreparedVm<'a> {
++    /// Add a fence to the reservation objects.
++    ///
++    /// This is a convenience wrapper around `exec_token.resv_add_fence` that
++    /// avoids exposing the private `LockedVm` type.
++    pub(crate) fn resv_add_fence(
++        &mut self,
++        fence: &impl kernel::dma_fence::RawDmaFence,
++        private_usage: u32,
++        extobj_usage: u32,
++    ) {
++        self.exec_token
++            .resv_add_fence(fence, private_usage, extobj_usage);
++    }
++}
++
+ /// 256M of every VM is reserved for kernel objects by default, i.e.: heap
+ /// chunks, heapcontext, ring buffers, kernel synchronization objects and etc.
+ ///
+diff --git a/drivers/gpu/drm/tyr/sched/deps.rs b/drivers/gpu/drm/tyr/sched/deps.rs
+index 61d6788b2c..bc3ff82e91 100644
+--- a/drivers/gpu/drm/tyr/sched/deps.rs
++++ b/drivers/gpu/drm/tyr/sched/deps.rs
+@@ -238,7 +238,14 @@ pub(crate) fn collect_signal_ops(&mut self, syncops: &[SyncOp]) -> Result {
+     ///
+     /// This method takes the entity as a parameter, processes all jobs, and pushes them
+     /// immediately to avoid lifetime conflicts.
+-    pub(crate) fn add_deps_and_push_jobs(&mut self, entity: &mut Entity<Job>) -> Result {
++    ///
++    /// Returns a vector of finished fences that need to be added to reservation objects.
++    pub(crate) fn add_deps_and_push_jobs(
++        &mut self,
++        entity: &mut Entity<Job>,
++    ) -> Result<KVec<Fence>> {
++        let mut finished_fences = KVec::new();
++
+         for job_idx in 0..self.jobs.len() {
+             // Only process GPU jobs with this entity
+             match &self.jobs[job_idx].state {
+@@ -264,22 +271,28 @@ pub(crate) fn add_deps_and_push_jobs(&mut self, entity: &mut Entity<Job>) -> Res
+ 
+             let mut armed_job = pending_job.arm();
+ 
++            let finished_fence = armed_job.fences().finished();
++
+             // Update the sync signal fences with the job's completion fence
+-            self.update_job_syncs(job_idx, armed_job.fences().finished())?;
++            self.update_job_syncs(job_idx, finished_fence.clone())?;
++
++            finished_fences.push(finished_fence, GFP_KERNEL)?;
+ 
+-            // Note: In the C code, there's an `upd_resvs` callback here
+-            // that updates reservation objects. We're skipping that for now.
+             armed_job.push();
+         }
+ 
+-        Ok(())
++        Ok(finished_fences)
+     }
+ 
+     /// Add VM bind job dependencies, arm jobs, and push them to the scheduler.
++    ///
++    /// Returns a vector of finished fences that need to be added to reservation objects.
+     pub(crate) fn add_deps_and_push_vm_bind_jobs(
+         &mut self,
+         entity: &mut Entity<VmBindJob>,
+-    ) -> Result {
++    ) -> Result<KVec<Fence>> {
++        let mut finished_fences = KVec::new();
++
+         for job_idx in 0..self.jobs.len() {
+             // Only process VM bind jobs with this entity
+             match &self.jobs[job_idx].state {
+@@ -305,13 +318,17 @@ pub(crate) fn add_deps_and_push_vm_bind_jobs(
+ 
+             let mut armed_job = pending_job.arm();
+ 
++            let finished_fence = armed_job.fences().finished();
++
+             // Update the sync signal fences with the job's completion fence
+-            self.update_job_syncs(job_idx, armed_job.fences().finished())?;
++            self.update_job_syncs(job_idx, finished_fence.clone())?;
++
++            finished_fences.push(finished_fence, GFP_KERNEL)?;
+ 
+             armed_job.push();
+         }
+ 
+-        Ok(())
++        Ok(finished_fences)
+     }
+ 
+     /// Push signal fences to their associated syncobjs
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index 3948549160..aaa0a6572c 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -279,9 +279,10 @@ pub(super) fn submit(
+ 
+         let vm = self.vm.lock();
+ 
+-        // Create all jobs and add them to the context
+-        self.with_locked_inner(|inner| {
+-            vm.with_prepared_vm(queue_submits.len() as u32, |locked_vm| {
++        // Prepare the VM with enough slots for all submissions
++        vm.with_prepared_vm(queue_submits.len() as u32, |mut locked_vm| {
++            // Create all jobs and add them to the context
++            self.with_locked_inner(|inner| {
+                 for queue_submit in queue_submits.iter() {
+                     let queue = inner
+                         .queues
+@@ -307,21 +308,33 @@ pub(super) fn submit(
+                     fences.push(fence, GFP_KERNEL)?;
+                 }
+                 Ok(())
+-            })
+-        })?;
++            })?;
+ 
+-        ctx.collect_signal_ops(&internal_syncs)?;
++            ctx.collect_signal_ops(&internal_syncs)?;
++
++            // Now process jobs through their respective queue entities
++            // For now, we assume single queue submit (as enforced in file.rs)
++            // In the future, this will need to be extended to handle multiple queues
++            if !queue_submits.is_empty() {
++                let queue_idx = queue_submits[0].queue_index as usize;
++
++                let finished_fences = self.with_locked_inner(|inner| {
++                    let queue = inner.queues.get_mut(queue_idx).ok_or(EINVAL)?;
++                    ctx.add_deps_and_push_jobs(&mut queue.entity)
++                })?;
++
++                // Add the finished fences to the reservation objects
++                for fence in &finished_fences {
++                    locked_vm.resv_add_fence(
++                        fence,
++                        kernel::bindings::dma_resv_usage_DMA_RESV_USAGE_BOOKKEEP,
++                        kernel::bindings::dma_resv_usage_DMA_RESV_USAGE_BOOKKEEP,
++                    );
++                }
++            }
+ 
+-        // Now process jobs through their respective queue entities
+-        // For now, we assume single queue submit (as enforced in file.rs)
+-        // In the future, this will need to be extended to handle multiple queues
+-        if !queue_submits.is_empty() {
+-            let queue_idx = queue_submits[0].queue_index as usize;
+-            self.with_locked_inner(|inner| {
+-                let queue = inner.queues.get_mut(queue_idx).ok_or(EINVAL)?;
+-                ctx.add_deps_and_push_jobs(&mut queue.entity)
+-            })?;
+-        }
++            Ok(())
++        })?;
+ 
+         // Push all signal fences to their syncobjs
+         ctx.push_fences();
+-- 
+2.51.0
+

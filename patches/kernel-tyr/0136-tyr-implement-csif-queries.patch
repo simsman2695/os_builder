@@ -1,0 +1,177 @@
+From 46aac89f3f74f5c8254bf0820507f691e249340d Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Fri, 24 Oct 2025 14:56:09 -0300
+Subject: [PATCH 136/161] tyr: implement csif queries
+
+We already have this information laying around. Fill it in.
+
+We need that in order to run on top of upstream mesa.
+---
+ drivers/gpu/drm/tyr/driver.rs       |  6 ++++++
+ drivers/gpu/drm/tyr/file.rs         | 17 +++++++++++++++++
+ drivers/gpu/drm/tyr/fw/global/cs.rs |  3 +++
+ drivers/gpu/drm/tyr/gpu.rs          | 20 ++++++++++++++++++++
+ drivers/gpu/drm/tyr/sched.rs        | 16 ++++++++++++++--
+ 5 files changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/driver.rs b/drivers/gpu/drm/tyr/driver.rs
+index c4bb6311cd..8b1522be9c 100644
+--- a/drivers/gpu/drm/tyr/driver.rs
++++ b/drivers/gpu/drm/tyr/driver.rs
+@@ -85,6 +85,11 @@ pub(crate) struct TyrData {
+     // Some inforation on the GPU. This is mainly queried by userspace (mesa).
+     pub(crate) gpu_info: GpuInfo,
+ 
++    /// CSIF information that gets populated after firmware initialization.
++    /// Kept separate with a mutex since it's populated later.
++    #[pin]
++    pub(crate) csif_info: Mutex<gpu::CsifInfo>,
++
+     /// The firmware running on the MCU.
+     #[pin]
+     pub(crate) fw: Firmware,
+@@ -306,6 +311,7 @@ fn probe(
+                     sram: sram_regulator,
+                 }),
+                 gpu_info,
++                csif_info <- new_mutex!(gpu::CsifInfo::default()),
+                 fw <- fw,
+                 coherent: false, // TODO. The GPU is not IO coherent on rk3588, which is what I am testing on.
+                 mmu,
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index f1f612aac3..c46025fd6a 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -20,6 +20,7 @@
+ use crate::driver::TyrDevice;
+ use crate::driver::TyrDriver;
+ use crate::gem;
++use crate::gpu;
+ use crate::heap;
+ use crate::mmu::vm;
+ use crate::mmu::vm::pool::Pool;
+@@ -77,6 +78,10 @@ pub(crate) fn dev_query(
+                     devquery.size = core::mem::size_of_val(&tdev.gpu_info) as u32;
+                     Ok(0)
+                 }
++                uapi::drm_panthor_dev_query_type_DRM_PANTHOR_DEV_QUERY_CSIF_INFO => {
++                    devquery.size = core::mem::size_of::<gpu::CsifInfo>() as u32;
++                    Ok(0)
++                }
+                 _ => Err(EINVAL),
+             }
+         } else {
+@@ -92,6 +97,18 @@ pub(crate) fn dev_query(
+ 
+                     Ok(0)
+                 }
++                uapi::drm_panthor_dev_query_type_DRM_PANTHOR_DEV_QUERY_CSIF_INFO => {
++                    let mut writer = UserSlice::new(
++                        UserPtr::from_addr(devquery.pointer as usize),
++                        devquery.size as usize,
++                    )
++                    .writer();
++
++                    let csif = tdev.csif_info.lock();
++                    writer.write(&*csif)?;
++
++                    Ok(0)
++                }
+                 _ => Err(EINVAL),
+             }
+         }
+diff --git a/drivers/gpu/drm/tyr/fw/global/cs.rs b/drivers/gpu/drm/tyr/fw/global/cs.rs
+index a30716f1a7..6916282537 100644
+--- a/drivers/gpu/drm/tyr/fw/global/cs.rs
++++ b/drivers/gpu/drm/tyr/fw/global/cs.rs
+@@ -19,6 +19,9 @@
+ use crate::fw::SharedSectionRange;
+ use constants::*;
+ 
++/// Number of CS registers reserved by the kernel driver to call a userspace command stream.
++pub(crate) const CSF_UNPRESERVED_REG_COUNT: u32 = 4;
++
+ /// Used to decode command stream faults.
+ pub(crate) const FAULT_EXCEPTION_MAP: &[(u32, &CStr)] = &[
+     (0x00, c_str!("OK")),
+diff --git a/drivers/gpu/drm/tyr/gpu.rs b/drivers/gpu/drm/tyr/gpu.rs
+index a043ced67c..6d2f4c3056 100644
+--- a/drivers/gpu/drm/tyr/gpu.rs
++++ b/drivers/gpu/drm/tyr/gpu.rs
+@@ -8,11 +8,31 @@
+ use kernel::io::mem::IoMem;
+ use kernel::platform;
+ use kernel::prelude::*;
++use kernel::sync::Mutex;
+ use kernel::time;
+ use kernel::transmute::AsBytes;
+ 
+ pub(crate) mod irq;
+ 
++/// CSIF (Command Stream Interface) information
++#[repr(C)]
++#[derive(Default, Clone, Copy)]
++pub(crate) struct CsifInfo {
++    pub(crate) csg_slot_count: u32,
++    pub(crate) cs_slot_count: u32,
++    pub(crate) cs_reg_count: u32,
++    pub(crate) scoreboard_slot_count: u32,
++    pub(crate) unpreserved_cs_reg_count: u32,
++    pub(crate) pad: u32,
++}
++
++// SAFETY:
++//
++// This type matches the drm_panthor_csif_info structure from Panthor's uAPI.
++// As it's declared as #repr(C), we can be sure that the layout is the same.
++// Therefore, it is safe to expose this to userspace.
++unsafe impl AsBytes for CsifInfo {}
++
+ #[repr(C)]
+ // This can be queried by userspace to get information about the GPU.
+ pub(crate) struct GpuInfo {
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index 3e3ccbe032..2d1765cff1 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -111,7 +111,7 @@ pub(crate) struct Scheduler {
+ 
+ impl Scheduler {
+     pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+-        let (group_num, sb_slot_count, cs_slot_count) =
++        let (group_num, sb_slot_count, cs_slot_count, cs_reg_count) =
+             tdev.fw.with_locked_global_iface(|glb_iface| {
+                 let glb_control = glb_iface.read_control()?;
+ 
+@@ -124,8 +124,9 @@ pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+                 let group_num = glb_control.group_num;
+                 let sb_slot_count = cs_control.scoreboards();
+                 let cs_slot_count = csg_control.stream_num;
++                let cs_reg_count = cs_control.work_regs();
+ 
+-                Ok((group_num, sb_slot_count, cs_slot_count))
++                Ok((group_num, sb_slot_count, cs_slot_count, cs_reg_count))
+             })?;
+ 
+         let num_groups = core::cmp::min(MAX_CSGS, group_num);
+@@ -152,6 +153,17 @@ pub(crate) fn init(tdev: &TyrDevice) -> Result<Self> {
+ 
+         let wq = OwnedQueue::new(c_str!("tyr-csf-sched"), WqFlags::UNBOUND, 0)?;
+ 
++        // Populate CSIF info in TyrDevice
++        {
++            use crate::fw::global::cs::CSF_UNPRESERVED_REG_COUNT;
++            let mut csif = tdev.csif_info.lock();
++            csif.csg_slot_count = csg_slot_count;
++            csif.cs_slot_count = cs_slot_count;
++            csif.cs_reg_count = cs_reg_count;
++            csif.scoreboard_slot_count = sb_slot_count;
++            csif.unpreserved_cs_reg_count = CSF_UNPRESERVED_REG_COUNT;
++        }
++
+         Ok(Self {
+             runnable_groups: [const { KVec::new() }; Priority::num_priorities()],
+             idle_groups: [const { KVec::new() }; Priority::num_priorities()],
+-- 
+2.51.0
+

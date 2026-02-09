@@ -1,0 +1,52 @@
+From cf72fdc152b538bf177afbd4e33e74a3a49057eb Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Tue, 22 Jul 2025 15:12:28 +0200
+Subject: [PATCH 097/161] drm: tyr: Swap lock order to avoid lock contention
+
+Flip the locking sequence to avoid running into potential deadlock
+when groups.submit runs at the same time a job is being handled.
+This extends slightly the scope of GroupInner lock but it should be
+acceptable. Otherwise this can be revisited.
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ drivers/gpu/drm/tyr/sched/group.rs | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index 2e72076947..f80b20c522 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -307,21 +307,20 @@ pub(super) fn submit(
+         let mut fences = KVec::with_capacity(queue_submits.len(), GFP_KERNEL)?;
+ 
+         let vm = self.vm.lock();
+-        vm.with_prepared_vm(queue_submits.len() as u32, |locked_vm| {
+-            queue_submits.into_iter().try_for_each(|queue_submit| {
+-                let fence = self.with_locked_inner(|inner| {
+-                    inner.submit(
++        self.with_locked_inner(|inner| {
++            vm.with_prepared_vm(queue_submits.len() as u32, |locked_vm| {
++                queue_submits.into_iter().try_for_each(|queue_submit| {
++                    let fence = inner.submit(
+                         &in_syncs,
+                         &out_syncs,
+                         self.clone(),
+                         queue_submit,
+                         &locked_vm,
+                         client_id,
+-                    )
+-                })?;
+-
+-                fences.push(fence, GFP_KERNEL)?;
+-                Ok(())
++                    )?;
++                    fences.push(fence, GFP_KERNEL)?;
++                    Ok(())
++                })
+             })
+         })?;
+ 
+-- 
+2.51.0
+

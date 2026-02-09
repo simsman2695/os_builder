@@ -1,0 +1,68 @@
+From 5323f4cf92b6f42e04a0a0f79bec307c2d8fd55d Mon Sep 17 00:00:00 2001
+From: Carsten Haitzler <carsten.haitzler@foss.arm.com>
+Date: Wed, 23 Apr 2025 16:48:28 +0100
+Subject: [PATCH 086/161] tyr: firmware: fix modinfo to list current firmware
+ files used
+
+This uses the new module_firmware macro that builds on ModInfoBuilder to
+add useful information as to which firmware files are needed.
+
+Signed-off-by: Carsten Haitzler <carsten.haitzler@foss.arm.com>
+---
+ drivers/gpu/drm/tyr/fw.rs  | 25 +++++++++++++++++++++++++
+ drivers/gpu/drm/tyr/tyr.rs |  2 ++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/drivers/gpu/drm/tyr/fw.rs b/drivers/gpu/drm/tyr/fw.rs
+index 1d24713f11..b394c8e5fc 100644
+--- a/drivers/gpu/drm/tyr/fw.rs
++++ b/drivers/gpu/drm/tyr/fw.rs
+@@ -3,6 +3,7 @@
+ use global::GlobalInterface;
+ use kernel::bindings::SZ_1G;
+ use kernel::devres::Devres;
++use kernel::firmware;
+ use kernel::io::mem::IoMem;
+ use kernel::new_mutex;
+ use kernel::platform;
+@@ -367,3 +368,27 @@ fn interrupt_ack(&self) -> Result<RequestField> {
+         Err(ENOTSUPP)
+     }
+ }
++
++/// Add modinfo to the module file such as firmware files needed
++pub(crate) struct ModInfoBuilder<const N: usize>(firmware::ModInfoBuilder<N>);
++
++impl<const N: usize> ModInfoBuilder<N> {
++    /// A list of firmware files + paths needed
++    const FILES: &'static [&'static str] = &[
++        "arm/mali/arch10.8/mali_csffw.bin",
++        // Add more files here as needed in future
++    ];
++
++    /// Create the builder that generated the info at compile-time
++    pub (crate) const fn create(module_name: &'static kernel::str::CStr)
++        -> kernel::firmware::ModInfoBuilder<N> {
++        let mut bld = kernel::firmware::ModInfoBuilder::new(module_name);
++        // Walk over files listed above and add them to modinfo
++        let mut i = 0;
++        while i < Self::FILES.len() {
++            bld = bld.new_entry().push(Self::FILES[i]);
++            i += 1;
++        }
++        bld
++    }
++}
+diff --git a/drivers/gpu/drm/tyr/tyr.rs b/drivers/gpu/drm/tyr/tyr.rs
+index 86b338901e..e473aaa924 100644
+--- a/drivers/gpu/drm/tyr/tyr.rs
++++ b/drivers/gpu/drm/tyr/tyr.rs
+@@ -53,3 +53,5 @@
+     description: "Rust driver for ARM Mali CSF-based GPUs",
+     license: "Dual MIT/GPL",
+ }
++
++kernel::module_firmware!(fw::ModInfoBuilder);
+-- 
+2.51.0
+

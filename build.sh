@@ -6,10 +6,17 @@
 #
 # Options:
 #   --prebuilt-uboot   Use known-good prebuilt U-Boot instead of building from source
+#   --tyr              Use Tyr Rust GPU driver (requires KERNEL_PROFILE=6.18)
+#
+# Environment variables:
+#   KERNEL_PROFILE   Kernel profile to use (e.g. 6.1, 6.18)
+#   UBUNTU_VERSION   Ubuntu version to build (default: 24.04, also supports 25.04)
 #
 # Examples:
-#   ./build.sh rock-5b                          # run all stages
+#   ./build.sh rock-5b                          # run all stages (24.04 + vendor kernel)
+#   UBUNTU_VERSION=25.04 ./build.sh rock-5b     # build with Ubuntu 25.04
 #   ./build.sh --prebuilt-uboot rock-5b         # use prebuilt U-Boot binaries
+#   KERNEL_PROFILE=6.18 ./build.sh --tyr rock-5b # mainline kernel with Tyr GPU driver
 #   ./build.sh rock-5b prerequisites            # check host tools only
 #   ./build.sh rock-5b fetch-dts kernel         # fetch DTS + build kernel
 #   ./build.sh rock-5b rootfs image             # customize rootfs + assemble image
@@ -63,9 +70,11 @@ usage() {
 
 # ── parse args ───────────────────────────────────────────────────────────────
 USE_PREBUILT_UBOOT=false
+USE_TYR=false
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --prebuilt-uboot) USE_PREBUILT_UBOOT=true; shift ;;
+        --tyr) USE_TYR=true; shift ;;
         *) echo "Error: Unknown option '$1'"; usage ;;
     esac
 done
@@ -75,7 +84,9 @@ BOARD="${1:-}"
 shift
 
 export USE_PREBUILT_UBOOT
+export USE_TYR
 export KERNEL_PROFILE="${KERNEL_PROFILE:-}"
+export UBUNTU_VERSION="${UBUNTU_VERSION:-}"
 
 # Validate board config exists
 [[ -f "${BUILDER_DIR}/config/boards/${BOARD}.conf" ]] \

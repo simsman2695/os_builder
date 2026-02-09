@@ -1,0 +1,34 @@
+From 582fed13c5f06fc9dbbdd906fdc77959b212961e Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sun, 5 Feb 2023 20:29:01 +0900
+Subject: [PATCH 047/161] rust: Add a Sealed trait
+
+Some traits exposed by the kernel crate may not be intended to be
+implemented by downstream modules. Add a Sealed trait to allow avoiding
+this using the sealed trait pattern.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/lib.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index ed5dac4151..25bbc03fc2 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -139,6 +139,11 @@
+ pub use macros;
+ pub use uapi;
+ 
++pub(crate) mod private {
++    #[allow(unreachable_pub)]
++    pub trait Sealed {}
++}
++
+ /// Prefix to appear before log messages printed from within the `kernel` crate.
+ const __LOG_PREFIX: &[u8] = b"rust_kernel\0";
+ 
+-- 
+2.51.0
+

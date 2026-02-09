@@ -1,0 +1,190 @@
+From 30769282ed0a1703b36cfa386d6be5aca355110d Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Fri, 11 Apr 2025 12:33:12 +0000
+Subject: [PATCH 055/161] workqueue: rust: add creation of workqueues
+
+Creating workqueues is needed by various GPU drivers. Not only does it
+give you better control over execution, it also allows devices to ensure
+that all tasks have exited before the device is unbound (or similar) by
+running the workqueue destructor.
+
+This patch is being developed in parallel with the new Owned type [1].
+The OwnedQueue struct becomes redundant once [1] lands; at that point it
+can be replaced with Owned<Queue>, and constructors can be moved to the
+Queue type.
+
+A wrapper type WqFlags is provided for workqueue flags. Since we only
+provide the | operator for this wrapper type, this makes it impossible
+to pass internal workqueue flags to the workqueue constructor. It has
+the consequence that we need a separate constant for the no-flags case,
+as the constructor does not accept a literal 0. I named this constant
+"BOUND" to signify the opposite of UNBOUND.
+
+Link: https://lore.kernel.org/rust-for-linux/20250325-unique-ref-v9-0-e91618c1de26@pm.me/ [1]
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ rust/kernel/workqueue.rs | 141 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 140 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/workqueue.rs b/rust/kernel/workqueue.rs
+index b9343d5bc0..864bf7052b 100644
+--- a/rust/kernel/workqueue.rs
++++ b/rust/kernel/workqueue.rs
+@@ -194,7 +194,7 @@
+     time::Jiffies,
+     types::Opaque,
+ };
+-use core::marker::PhantomData;
++use core::{marker::PhantomData, ops::Deref, ptr::NonNull};
+ 
+ /// Creates a [`Work`] initialiser with the given name and a newly-created lock class.
+ #[macro_export]
+@@ -346,6 +346,145 @@ pub fn try_spawn<T: 'static + Send + FnOnce()>(
+     }
+ }
+ 
++/// Workqueue flags.
++///
++/// For details, please refer to `Documentation/core-api/workqueue.rst`.
++///
++/// # Invariants
++///
++/// Must contain a valid combination of workqueue flags that may be used with `alloc_workqueue`.
++#[repr(transparent)]
++#[derive(Copy, Clone)]
++pub struct WqFlags(bindings::wq_flags);
++
++impl WqFlags {
++    /// Bound to a cpu.
++    pub const BOUND: WqFlags = WqFlags(0);
++    /// Execute in bottom half (softirq) context.
++    pub const BH: WqFlags = WqFlags(bindings::wq_flags_WQ_BH);
++    /// Not bound to a cpu.
++    pub const UNBOUND: WqFlags = WqFlags(bindings::wq_flags_WQ_UNBOUND);
++    /// Freeze during suspend.
++    pub const FREEZABLE: WqFlags = WqFlags(bindings::wq_flags_WQ_FREEZABLE);
++    /// May be used for memory reclaim.
++    pub const MEM_RECLAIM: WqFlags = WqFlags(bindings::wq_flags_WQ_MEM_RECLAIM);
++    /// High priority.
++    pub const HIGHPRI: WqFlags = WqFlags(bindings::wq_flags_WQ_HIGHPRI);
++    /// Cpu intensive workqueue.
++    pub const CPU_INTENSIVE: WqFlags = WqFlags(bindings::wq_flags_WQ_CPU_INTENSIVE);
++    /// Visible in sysfs.
++    pub const SYSFS: WqFlags = WqFlags(bindings::wq_flags_WQ_SYSFS);
++    /// Power-efficient workqueue.
++    pub const POWER_EFFICIENT: WqFlags = WqFlags(bindings::wq_flags_WQ_POWER_EFFICIENT);
++}
++
++impl core::ops::BitOr for WqFlags {
++    type Output = WqFlags;
++    fn bitor(self, rhs: WqFlags) -> WqFlags {
++        WqFlags(self.0 | rhs.0)
++    }
++}
++
++/// An owned kernel work queue.
++///
++/// # Invariants
++///
++/// `queue` points at a valid workqueue that is owned by this `OwnedQueue`.
++pub struct OwnedQueue {
++    queue: NonNull<Queue>,
++}
++
++impl OwnedQueue {
++    /// Allocates a new workqueue.
++    ///
++    /// The provided name is used verbatim as the workqueue name.
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// use kernel::c_str;
++    /// use kernel::workqueue::{OwnedQueue, WqFlags};
++    ///
++    /// let wq = OwnedQueue::new(c_str!("my-wq"), WqFlags::UNBOUND, 0)?;
++    /// wq.try_spawn(
++    ///     GFP_KERNEL,
++    ///     || pr_warn!("Printing from my-wq"),
++    /// )?;
++    /// # Ok::<(), Error>(())
++    /// ```
++    #[inline]
++    pub fn new(name: &CStr, flags: WqFlags, max_active: usize) -> Result<OwnedQueue, AllocError> {
++        // SAFETY:
++        // * "%s\0" is compatible with passing the name as a c-string.
++        // * the flags argument does not include internal flags.
++        let ptr = unsafe {
++            bindings::alloc_workqueue(
++                b"%s\0".as_ptr(),
++                flags.0,
++                i32::try_from(max_active).unwrap_or(i32::MAX),
++                name.as_char_ptr(),
++            )
++        };
++
++        Ok(OwnedQueue {
++            queue: NonNull::new(ptr).ok_or(AllocError)?.cast(),
++        })
++    }
++
++    /// Allocates a new workqueue.
++    ///
++    /// # Examples
++    ///
++    /// This example shows how to pass a Rust string formatter to the workqueue name, creating
++    /// workqueues with names such as `my-wq-1` and `my-wq-2`.
++    ///
++    /// ```
++    /// use kernel::alloc::AllocError;
++    /// use kernel::workqueue::{OwnedQueue, WqFlags};
++    ///
++    /// fn my_wq(num: u32) -> Result<OwnedQueue, AllocError> {
++    ///     OwnedQueue::new_fmt(format_args!("my-wq-{num}"), WqFlags::UNBOUND, 0)
++    /// }
++    /// ```
++    #[inline]
++    pub fn new_fmt(
++        name: core::fmt::Arguments<'_>,
++        flags: WqFlags,
++        max_active: usize,
++    ) -> Result<OwnedQueue, AllocError> {
++        // SAFETY:
++        // * "%pA\0" is compatible with passing an `Arguments` pointer.
++        // * the flags argument does not include internal flags.
++        let ptr = unsafe {
++            bindings::alloc_workqueue(
++                b"%pA\0".as_ptr(),
++                flags.0,
++                i32::try_from(max_active).unwrap_or(i32::MAX),
++                (&name) as *const _ as *const crate::ffi::c_void,
++            )
++        };
++
++        Ok(OwnedQueue {
++            queue: NonNull::new(ptr).ok_or(AllocError)?.cast(),
++        })
++    }
++}
++
++impl Deref for OwnedQueue {
++    type Target = Queue;
++    fn deref(&self) -> &Queue {
++        // SAFETY: By the type invariants, this pointer references a valid queue.
++        unsafe { &*self.queue.as_ptr() }
++    }
++}
++
++impl Drop for OwnedQueue {
++    fn drop(&mut self) {
++        // SAFETY: The `OwnedQueue` is being destroyed, so we can destroy the workqueue it owns.
++        unsafe { bindings::destroy_workqueue(self.queue.as_ptr().cast()) }
++    }
++}
++
+ /// A helper type used in [`try_spawn`].
+ ///
+ /// [`try_spawn`]: Queue::try_spawn
+-- 
+2.51.0
+

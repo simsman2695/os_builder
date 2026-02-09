@@ -1,0 +1,24 @@
+From c148a64d45dd094390fa81cd2c60e0711dbec377 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 18 Nov 2025 17:14:24 -0300
+Subject: [PATCH 157/161] tyr: add trace when async vm_binds timeout
+
+---
+ drivers/gpu/drm/tyr/mmu/vm/bind_job.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs b/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
+index 0fa433ac61..2d8ba01b24 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/bind_job.rs
+@@ -69,6 +69,7 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+     }
+ 
+     fn timed_out(_job: &mut kernel::drm::sched::Job<Self>) -> kernel::drm::sched::Status {
++        pr_info!("Async VM bind job timed out\n");
+         kernel::drm::sched::Status::NoDevice
+     }
+ }
+-- 
+2.51.0
+

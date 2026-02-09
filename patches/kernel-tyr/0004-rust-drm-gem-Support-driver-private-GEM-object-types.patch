@@ -1,0 +1,197 @@
+From 3badcbaa9e9685ca2cd2567855fe06c32e9e10e4 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:19 -0400
+Subject: [PATCH 004/161] rust: drm: gem: Support driver-private GEM object
+ types
+
+One of the original intents with the gem bindings was that drivers could
+specify additional gem implementations, in order to enable for driver
+private gem objects. This wasn't really possible however, as up until now
+our GEM bindings have always assumed that the only GEM object we would run
+into was driver::Driver::Object - meaning that implementing another GEM
+object type would result in all of the BaseDriverObject callbacks assuming
+the wrong type.
+
+This is a pretty easy fix though, all we need to do is specify a
+BaseDriverObject in driver::Driver instead of an AllocImpl, and then add an
+associated type for AllocImpl in BaseDriverObject. That way each
+BaseDriverObject has its own AllocImpl allowing it to know which type to
+provide in BaseDriverObject callbacks, and driver::Driver can simply go
+through the BaseDriverObject to its AllocImpl type in order to get access
+to ALLOC_OPS.
+
+So, let's do this and update Nova for these changes.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ drivers/gpu/drm/nova/driver.rs | 10 ++++++++--
+ drivers/gpu/drm/nova/gem.rs    |  1 +
+ rust/kernel/drm/device.rs      | 17 ++++++++++-------
+ rust/kernel/drm/driver.rs      |  2 +-
+ rust/kernel/drm/gem/mod.rs     | 21 +++++++++++++--------
+ 5 files changed, 33 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/nova/driver.rs b/drivers/gpu/drm/nova/driver.rs
+index b28b2e05cc..4c25242605 100644
+--- a/drivers/gpu/drm/nova/driver.rs
++++ b/drivers/gpu/drm/nova/driver.rs
+@@ -1,6 +1,12 @@
+ // SPDX-License-Identifier: GPL-2.0
+ 
+-use kernel::{auxiliary, c_str, device::Core, drm, drm::gem, drm::ioctl, prelude::*, types::ARef};
++use kernel::{
++    auxiliary, c_str,
++    device::Core,
++    drm::{self, gem, ioctl},
++    prelude::*,
++    types::ARef,
++};
+ 
+ use crate::file::File;
+ use crate::gem::NovaObject;
+@@ -57,7 +63,7 @@ fn probe(adev: &auxiliary::Device<Core>, _info: &Self::IdInfo) -> Result<Pin<KBo
+ impl drm::Driver for NovaDriver {
+     type Data = NovaData;
+     type File = File;
+-    type Object = gem::Object<NovaObject>;
++    type Object = NovaObject;
+ 
+     const INFO: drm::DriverInfo = INFO;
+ 
+diff --git a/drivers/gpu/drm/nova/gem.rs b/drivers/gpu/drm/nova/gem.rs
+index 71e714cdfa..d7192e800f 100644
+--- a/drivers/gpu/drm/nova/gem.rs
++++ b/drivers/gpu/drm/nova/gem.rs
+@@ -18,6 +18,7 @@ pub(crate) struct NovaObject {}
+ 
+ impl gem::DriverObject for NovaObject {
+     type Driver = NovaDriver;
++    type Object = gem::Object<Self>;
+ 
+     fn new(_dev: &NovaDevice, _size: usize) -> impl PinInit<Self, Error> {
+         try_pin_init!(NovaObject {})
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index d29c477e89..c027ba79cb 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -59,6 +59,9 @@ pub struct Device<T: drm::Driver> {
+     data: T::Data,
+ }
+ 
++/// A type alias for referring to the [`AllocImpl`] implementation for a DRM driver.
++type DriverAllocImpl<T> = <<T as drm::Driver>::Object as drm::gem::DriverObject>::Object;
++
+ impl<T: drm::Driver> Device<T> {
+     const VTABLE: bindings::drm_driver = drm_legacy_fields! {
+         load: None,
+@@ -69,13 +72,13 @@ impl<T: drm::Driver> Device<T> {
+         master_set: None,
+         master_drop: None,
+         debugfs_init: None,
+-        gem_create_object: T::Object::ALLOC_OPS.gem_create_object,
+-        prime_handle_to_fd: T::Object::ALLOC_OPS.prime_handle_to_fd,
+-        prime_fd_to_handle: T::Object::ALLOC_OPS.prime_fd_to_handle,
+-        gem_prime_import: T::Object::ALLOC_OPS.gem_prime_import,
+-        gem_prime_import_sg_table: T::Object::ALLOC_OPS.gem_prime_import_sg_table,
+-        dumb_create: T::Object::ALLOC_OPS.dumb_create,
+-        dumb_map_offset: T::Object::ALLOC_OPS.dumb_map_offset,
++        gem_create_object: DriverAllocImpl::<T>::ALLOC_OPS.gem_create_object,
++        prime_handle_to_fd: DriverAllocImpl::<T>::ALLOC_OPS.prime_handle_to_fd,
++        prime_fd_to_handle: DriverAllocImpl::<T>::ALLOC_OPS.prime_fd_to_handle,
++        gem_prime_import: DriverAllocImpl::<T>::ALLOC_OPS.gem_prime_import,
++        gem_prime_import_sg_table: DriverAllocImpl::<T>::ALLOC_OPS.gem_prime_import_sg_table,
++        dumb_create: DriverAllocImpl::<T>::ALLOC_OPS.dumb_create,
++        dumb_map_offset: DriverAllocImpl::<T>::ALLOC_OPS.dumb_map_offset,
+         show_fdinfo: None,
+         fbdev_probe: None,
+ 
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index dae0f4d1bb..2500a61f45 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -103,7 +103,7 @@ pub trait Driver {
+     type Data: Sync + Send;
+ 
+     /// The type used to manage memory for this driver.
+-    type Object: AllocImpl;
++    type Object: drm::gem::DriverObject;
+ 
+     /// The type used to represent a DRM File (client)
+     type File: drm::file::DriverFile;
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index b27b9fbf28..ec36cd9ea6 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -26,16 +26,19 @@ pub trait DriverObject: Sync + Send + Sized {
+     /// Parent `Driver` for this object.
+     type Driver: drm::Driver;
+ 
++    /// The GEM object type that will be passed to various callbacks.
++    type Object: AllocImpl;
++
+     /// Create a new driver data object for a GEM object of a given size.
+     fn new(dev: &drm::Device<Self::Driver>, size: usize) -> impl PinInit<Self, Error>;
+ 
+     /// Open a new handle to an existing object, associated with a File.
+-    fn open(_obj: &<Self::Driver as drm::Driver>::Object, _file: &DriverFile<Self>) -> Result {
++    fn open(_obj: &Self::Object, _file: &DriverFile<Self>) -> Result {
+         Ok(())
+     }
+ 
+     /// Close a handle to an existing object, associated with a File.
+-    fn close(_obj: &<Self::Driver as drm::Driver>::Object, _file: &DriverFile<Self>) {}
++    fn close(_obj: &Self::Object, _file: &DriverFile<Self>) {}
+ }
+ 
+ /// Trait that represents a GEM object subtype
+@@ -83,7 +86,7 @@ extern "C" fn open_callback<T: DriverObject>(
+ 
+     // SAFETY: `open_callback` is specified in the AllocOps structure for `DriverObject<T>`,
+     // ensuring that `raw_obj` is contained within a `DriverObject<T>`
+-    let obj = unsafe { <<T::Driver as drm::Driver>::Object as IntoGEMObject>::from_raw(raw_obj) };
++    let obj = unsafe { T::Object::from_raw(raw_obj) };
+ 
+     match T::open(obj, file) {
+         Err(e) => e.to_errno(),
+@@ -100,7 +103,7 @@ extern "C" fn close_callback<T: DriverObject>(
+ 
+     // SAFETY: `close_callback` is specified in the AllocOps structure for `Object<T>`, ensuring
+     // that `raw_obj` is indeed contained within a `Object<T>`.
+-    let obj = unsafe { <<T::Driver as drm::Driver>::Object as IntoGEMObject>::from_raw(raw_obj) };
++    let obj = unsafe { T::Object::from_raw(raw_obj) };
+ 
+     T::close(obj, file);
+ }
+@@ -127,11 +130,12 @@ fn size(&self) -> usize {
+ 
+     /// Creates a new handle for the object associated with a given `File`
+     /// (or returns an existing one).
+-    fn create_handle<D, F>(&self, file: &drm::File<F>) -> Result<u32>
++    fn create_handle<D, F, O>(&self, file: &drm::File<F>) -> Result<u32>
+     where
+         Self: AllocImpl<Driver = D>,
+-        D: drm::Driver<Object = Self, File = F>,
++        D: drm::Driver<Object = O, File = F>,
+         F: drm::file::DriverFile,
++        O: DriverObject<Object = Self>,
+     {
+         let mut handle: u32 = 0;
+         // SAFETY: The arguments are all valid per the type invariants.
+@@ -142,11 +146,12 @@ fn create_handle<D, F>(&self, file: &drm::File<F>) -> Result<u32>
+     }
+ 
+     /// Looks up an object by its handle for a given `File`.
+-    fn lookup_handle<D, F>(file: &drm::File<F>, handle: u32) -> Result<ARef<Self>>
++    fn lookup_handle<D, F, O>(file: &drm::File<F>, handle: u32) -> Result<ARef<Self>>
+     where
+         Self: AllocImpl<Driver = D>,
+-        D: drm::Driver<Object = Self, File = F>,
++        D: drm::Driver<Object = O, File = F>,
+         F: drm::file::DriverFile,
++        O: DriverObject<Object = Self>,
+     {
+         // SAFETY: The arguments are all valid per the type invariants.
+         let ptr = unsafe { bindings::drm_gem_object_lookup(file.as_raw().cast(), handle) };
+-- 
+2.51.0
+

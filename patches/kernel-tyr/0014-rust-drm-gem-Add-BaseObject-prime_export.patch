@@ -1,0 +1,72 @@
+From 2b58b9928f1ca9472431255865addebd96237d13 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:29 -0400
+Subject: [PATCH 014/161] rust: drm: gem: Add BaseObject::prime_export()
+
+We just added an export() callback that GEM objects can implement, but
+without any way of actually exporting a DmaBuf<T>. So let's add one by
+introducing bindings for drm_gem_prime_export().
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ rust/kernel/dma_buf.rs     |  1 -
+ rust/kernel/drm/gem/mod.rs | 24 +++++++++++++++++++++++-
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/rust/kernel/dma_buf.rs b/rust/kernel/dma_buf.rs
+index a66829afcd..a2086918ef 100644
+--- a/rust/kernel/dma_buf.rs
++++ b/rust/kernel/dma_buf.rs
+@@ -20,7 +20,6 @@ unsafe impl Send for DmaBuf {}
+ // SAFETY: `struct dma_buf` is thread-safe
+ unsafe impl Sync for DmaBuf {}
+ 
+-#[expect(unused)]
+ impl DmaBuf {
+     /// Convert from a `*mut bindings::dma_buf` to a [`DmaBuf`].
+     ///
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index 1ac25fc6d5..75ffd5541e 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -11,7 +11,7 @@
+     bindings, dma_buf,
+     drm::driver::{AllocImpl, AllocOps},
+     drm::{self, private::Sealed},
+-    error::{to_result, Result},
++    error::{from_err_ptr, to_result, Result},
+     prelude::*,
+     types::{ARef, AlwaysRefCounted, Opaque},
+ };
+@@ -225,6 +225,28 @@ fn lookup_handle<D, F, O>(file: &drm::File<F>, handle: u32) -> Result<ARef<Self>
+         Ok(unsafe { ARef::from_raw(obj.into()) })
+     }
+ 
++    /// Export a [`DmaBuf`] for this GEM object using the DRM prime helper library.
++    ///
++    /// `flags` should be a set of flags from [`fs::file::flags`](kernel::fs::file::flags).
++    fn prime_export(&self, flags: u32) -> Result<DmaBuf<Self>> {
++        // SAFETY: `as_raw()` always returns a valid pointer to an initialized `drm_gem_object`.
++        let dma_ptr = unsafe { bindings::drm_gem_prime_export(self.as_raw(), flags as i32) };
++
++        // `drm_gem_prime_export()` returns either an error pointer, or a valid pointer to an
++        // initialized `dma_buf` on success.
++        let dma_ptr = from_err_ptr(dma_ptr)?;
++
++        // SAFETY:
++        // - We checked that dma_ptr is not an error, so it must point to an initialized dma_buf
++        // - We used drm_gem_prime_export(), so `dma_ptr` will remain valid until a call to
++        //   `drm_gem_prime_release()` which we don't call here.
++        let dma_buf = unsafe { dma_buf::DmaBuf::from_raw(dma_ptr) };
++
++        // INVARIANT: We used drm_gem_prime_export() to create this dma_buf, fulfilling the
++        // invariant that this dma_buf came from a GEM object of type `Self`.
++        Ok(DmaBuf(dma_buf.into(), PhantomData))
++    }
++
+     /// Creates an mmap offset to map the object from userspace.
+     fn create_mmap_offset(&self) -> Result<u64> {
+         // SAFETY: The arguments are valid per the type invariant.
+-- 
+2.51.0
+

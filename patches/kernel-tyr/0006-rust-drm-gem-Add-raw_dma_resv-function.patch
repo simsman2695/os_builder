@@ -1,0 +1,41 @@
+From 5293e15d66e1d3a8c21972fc747b852237081c95 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:21 -0400
+Subject: [PATCH 006/161] rust: drm: gem: Add raw_dma_resv() function
+
+For retrieving a pointer to the struct dma_resv for a given GEM object. We
+also introduce it in a new trait, BaseObjectPrivate, which we automatically
+implement for all gem objects and don't expose to users outside of the
+crate.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ rust/kernel/drm/gem/mod.rs | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index ec36cd9ea6..f901d4263e 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -186,6 +186,18 @@ fn create_mmap_offset(&self) -> Result<u64> {
+ 
+ impl<T: IntoGEMObject> BaseObject for T {}
+ 
++/// Crate-private base operations shared by all GEM object classes.
++#[expect(unused)]
++pub(crate) trait BaseObjectPrivate: IntoGEMObject {
++    /// Return a pointer to this object's dma_resv.
++    fn raw_dma_resv(&self) -> *mut bindings::dma_resv {
++        // SAFETY: `as_gem_obj()` always returns a valid pointer to the base DRM gem object
++        unsafe { (*self.as_raw()).resv }
++    }
++}
++
++impl<T: IntoGEMObject> BaseObjectPrivate for T {}
++
+ /// A base GEM object.
+ ///
+ /// Invariants
+-- 
+2.51.0
+

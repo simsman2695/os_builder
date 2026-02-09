@@ -1,0 +1,54 @@
+From 547cb4c246a0879dd7727b29f8c257f5b9d32440 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Tue, 22 Jul 2025 15:36:28 +0200
+Subject: [PATCH 098/161] drm:tyr: Narrow xarray spinlock scope
+
+Limit the xarray spinlock to just removing an item, so it is never held
+while grabbing a mutex. At the same time, wrap the group mutex in a
+closure to confine its scope to only the code that actually needs it
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ drivers/gpu/drm/tyr/mmu/vm/pool.rs |  3 +--
+ drivers/gpu/drm/tyr/sched/group.rs | 11 +++++------
+ 2 files changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/pool.rs b/drivers/gpu/drm/tyr/mmu/vm/pool.rs
+index cbb09e1ff1..d5aab5df30 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/pool.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/pool.rs
+@@ -70,8 +70,7 @@ pub(crate) fn get_vm(self: Pin<&Self>, index: usize) -> Option<Arc<Mutex<Vm>>> {
+ 
+     pub(crate) fn destroy_vm(self: Pin<&Self>, index: usize, iomem: Arc<Devres<IoMem>>) -> Result {
+         let xa = self.xa.as_ref();
+-        let mut guard = xa.lock();
+-        let vm = guard.remove(index).ok_or(EINVAL)?;
++        let vm = xa.lock().remove(index).ok_or(EINVAL)?;
+ 
+         let mut vm = vm.lock();
+         vm.destroyed = true;
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index f80b20c522..65ecdb6171 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -413,12 +413,11 @@ pub(crate) fn group(self: Pin<&Self>, index: usize) -> Option<Arc<Group>> {
+     pub(crate) fn destroy_group(self: Pin<&Self>, index: usize) -> Result {
+         let xa = self.xa.as_ref();
+ 
+-        let mut guard = xa.lock();
+-        let group = guard.remove(index).ok_or(EINVAL)?;
+-
+-        let mut group = group.inner.lock();
+-        group.destroyed = true;
++        let group = xa.lock().remove(index).ok_or(EINVAL)?;
+ 
+-        Ok(())
++        group.with_locked_inner(|inner| {
++            inner.destroyed = true;
++            Ok(())
++        })
+     }
+ }
+-- 
+2.51.0
+

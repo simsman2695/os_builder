@@ -1,0 +1,50 @@
+From c356f174b78500bcd66e7dd748e5e485b873b4dd Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 09:29:48 -0300
+Subject: [PATCH 124/161] tyr: vm: fix broken mair_to_memattr implementation
+
+I noticed that this was producing a different value of memattr when
+compared with Panthor. It still assumes a non-coherent system, however.
+---
+ drivers/gpu/drm/tyr/mmu/vm.rs | 12 +++++-------
+ 1 file changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index 3c5409d107..5778f1bb4d 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -328,10 +328,6 @@ pub(crate) enum VmUserSize {
+     Custom(u64),
+ }
+ 
+-fn as_memattr_aarch64_inner_alloc_expl(inner: bool, outer: bool) -> u8 {
+-    ((inner as u8) << 1) | (outer as u8)
+-}
+-
+ fn mair_to_memattr(mair: u64) -> u64 {
+     let mut memattr: u64 = 0;
+ 
+@@ -347,15 +343,17 @@ fn mair_to_memattr(mair: u64) -> u64 {
+         let out_attr = if (outer & 3 == 0) || (outer & 4 == 0) || (inner & 4 == 0) {
+             regs::AS_MEMATTR_AARCH64_INNER_OUTER_NC
+                 | regs::AS_MEMATTR_AARCH64_SH_MIDGARD_INNER
+-                | as_memattr_aarch64_inner_alloc_expl(false, false) as u32
++                | regs::as_memattr_aarch64_inner_alloc_expl(false, false)
+         } else {
+             // Use SH_CPU_INNER mode so SH_IS, which is used when
+             // IOMMU_CACHE is set, actually maps to the standard
+             // definition of inner-shareable and not Mali's
+             // internal-shareable mode.
++            //
++            // TODO: this assumes a non-coherent system.
+             regs::AS_MEMATTR_AARCH64_INNER_OUTER_WB
+-                | regs::AS_MEMATTR_AARCH64_SH_CPU_INNER
+-                | as_memattr_aarch64_inner_alloc_expl(inner & 1 != 0, inner & 2 != 0) as u32
++                | regs::AS_MEMATTR_AARCH64_SH_MIDGARD_INNER
++                | regs::as_memattr_aarch64_inner_alloc_expl(inner & 1 != 0, inner & 2 != 0)
+         };
+ 
+         memattr |= (out_attr as u64) << (8 * i);
+-- 
+2.51.0
+

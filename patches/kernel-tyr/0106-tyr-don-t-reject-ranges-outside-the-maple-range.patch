@@ -1,0 +1,92 @@
+From 5e499aecc3d954574705a989db6c8d332793ae8c Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Wed, 3 Sep 2025 14:16:25 +0000
+Subject: [PATCH 106/161] tyr: don't reject ranges outside the maple range
+
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/tyr/mmu/vm/range.rs | 47 ++++++++++++++++++-----------
+ 1 file changed, 29 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/range.rs b/drivers/gpu/drm/tyr/mmu/vm/range.rs
+index 9c46835cea..ab1b229180 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/range.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/range.rs
+@@ -98,24 +98,17 @@ pub(crate) fn allocate(&self, size: usize, gfp: Flags) -> Result<LiveRange> {
+     }
+ 
+     pub(crate) fn insert(&self, start: u64, end: u64, gfp: Flags) -> Result<LiveRange> {
+-        if end < start {
+-            return Err(EINVAL);
+-        }
+-        if start < self.inner.range.start {
+-            return Err(EINVAL);
+-        }
+-        if end > self.inner.range.end {
++        if end <= start {
+             return Err(EINVAL);
+         }
+ 
+         #[cfg(target_pointer_width = "32")]
+         {
+-            let maple_start = (start - self.inner.range.start) as usize;
+-            let maple_end = (end - self.inner.range.start) as usize;
+-
+-            self.inner
+-                .maple
+-                .insert_range(maple_start..maple_end, (), gfp)?;
++            if let Some(range) = self.inner.maple_range(start, end) {
++                self.inner
++                    .maple
++                    .insert_range(range, (), gfp)?;
++            }
+         }
+ 
+         #[cfg(target_pointer_width = "64")]
+@@ -133,6 +126,22 @@ pub(crate) fn insert(&self, start: u64, end: u64, gfp: Flags) -> Result<LiveRang
+     }
+ }
+ 
++#[cfg(target_pointer_width = "32")]
++impl RangeAllocInner {
++    fn maple_range(&self, start: u64, end: u64) -> Option<Range<usize>> {
++        let range_start = u64::max(start, self.range.start);
++        let range_end = u64::min(end, self.range.end);
++
++        if range_start != range_end {
++            let maple_start = (range_start - self.range.start) as usize;
++            let maple_end = (range_end - self.range.start) as usize;
++            Some(maple_start..maple_end)
++        } else {
++            None
++        }
++    }
++}
++
+ impl LiveRange {
+     pub(crate) fn size(&self) -> usize {
+         self.size
+@@ -152,13 +161,15 @@ pub(crate) fn range(&self) -> Range<u64> {
+ }
+ 
+ impl Drop for LiveRange {
++    #[cfg(target_pointer_width = "32")]
+     fn drop(&mut self) {
+-        #[cfg(target_pointer_width = "32")]
+-        self.inner
+-            .maple
+-            .erase((self.offset - self.inner.range.start) as usize);
++        if let Some(range) = self.inner.maple_range(start, end) {
++            self.inner.maple.erase(range.start);
++        }
++    }
+ 
+-        #[cfg(target_pointer_width = "64")]
++    #[cfg(target_pointer_width = "64")]
++    fn drop(&mut self) {
+         self.inner.maple.erase(self.offset as usize);
+     }
+ }
+-- 
+2.51.0
+

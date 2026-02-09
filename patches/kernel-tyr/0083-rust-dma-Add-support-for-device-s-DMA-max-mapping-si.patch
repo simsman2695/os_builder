@@ -1,0 +1,55 @@
+From a2188439f0ef3b293651f6ad251bf6c40956c195 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Mon, 1 Sep 2025 11:51:27 +0200
+Subject: [PATCH 083/161] rust: dma: Add support for device's DMA max mapping
+ size.
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/helpers/dma.c |  5 +++++
+ rust/kernel/dma.rs | 16 ++++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/rust/helpers/dma.c b/rust/helpers/dma.c
+index 6e741c1972..903f3277dc 100644
+--- a/rust/helpers/dma.c
++++ b/rust/helpers/dma.c
+@@ -19,3 +19,8 @@ int rust_helper_dma_set_mask_and_coherent(struct device *dev, u64 mask)
+ {
+ 	return dma_set_mask_and_coherent(dev, mask);
+ }
++
++void rust_helper_dma_set_max_seg_size(struct device *dev, unsigned int size)
++{
++	dma_set_max_seg_size(dev, size);
++}
+diff --git a/rust/kernel/dma.rs b/rust/kernel/dma.rs
+index b2a6282876..0ffb391b14 100644
+--- a/rust/kernel/dma.rs
++++ b/rust/kernel/dma.rs
+@@ -83,6 +83,22 @@ unsafe fn dma_set_mask_and_coherent(&self, mask: DmaMask) -> Result {
+             bindings::dma_set_mask_and_coherent(self.as_ref().as_raw(), mask.value())
+         })
+     }
++    /// Set up the device's DMA max mapping size.
++    ///
++    /// This method is usually called once from `probe()` as soon as the device capabilities are
++    /// known.
++    ///
++    /// # Safety
++    ///
++    /// This method must not be called concurrently with any DMA allocation or mapping primitives,
++    /// such as [`CoherentAllocation::alloc_attrs`].
++    unsafe fn dma_set_max_seg_size(&self, size: u32) {
++        // SAFETY:
++        // - By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
++        // - The safety requirement of this function guarantees that there are no concurrent calls
++        //   to DMA allocation and mapping primitives using this mask.
++        unsafe { bindings::dma_set_max_seg_size(self.as_ref().as_raw(), size) };
++    }
+ }
+ 
+ /// A DMA mask that holds a bitmask with the lowest `n` bits set.
+-- 
+2.51.0
+

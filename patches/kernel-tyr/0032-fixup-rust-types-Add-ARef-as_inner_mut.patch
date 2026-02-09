@@ -1,0 +1,58 @@
+From a49f828f93528361f23546a109a21b3f737027dc Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Thu, 28 Aug 2025 13:49:29 +0200
+Subject: [PATCH 032/161] fixup!: rust: types: Add ARef::as_inner_mut()
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/kernel/sync/aref.rs | 11 +++++++++++
+ rust/kernel/types.rs     | 11 -----------
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/rust/kernel/sync/aref.rs b/rust/kernel/sync/aref.rs
+index dbd77bb686..7c00a7d860 100644
+--- a/rust/kernel/sync/aref.rs
++++ b/rust/kernel/sync/aref.rs
+@@ -118,6 +118,17 @@ pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
+     pub fn into_raw(me: Self) -> NonNull<T> {
+         ManuallyDrop::new(me).ptr
+     }
++
++    /// Acquire a mutable reference to `T`.
++    ///
++    /// # Safety
++    ///
++    /// Callers must ensure that they have exclusive access to `T`. This also implies that no other
++    /// `ARef`s may be taken out for `T`.
++    pub(crate) unsafe fn as_inner_mut(&mut self) -> &mut T {
++        // SAFETY: Our safety contract guarantees we have exclusive access to `T`
++        unsafe { self.ptr.as_mut() }
++    }
+ }
+ 
+ impl<T: AlwaysRefCounted> Clone for ARef<T> {
+diff --git a/rust/kernel/types.rs b/rust/kernel/types.rs
+index c8738f2565..dc0a02f5c3 100644
+--- a/rust/kernel/types.rs
++++ b/rust/kernel/types.rs
+@@ -408,17 +408,6 @@ pub const fn cast_into(this: *const Self) -> *mut T {
+     pub const fn cast_from(this: *const T) -> *const Self {
+         this.cast()
+     }
+-
+-    /// Acquire a mutable reference to `T`.
+-    ///
+-    /// # Safety
+-    ///
+-    /// Callers must ensure that they have exclusive access to `T`. This also implies that no other
+-    /// `ARef`s may be taken out for `T`.
+-    pub(crate) unsafe fn as_inner_mut(&mut self) -> &mut T {
+-        // SAFETY: Our safety contract guarantees we have exclusive access to `T`
+-        unsafe { self.ptr.as_mut() }
+-    }
+ }
+ 
+ impl<T> Wrapper<T> for Opaque<T> {
+-- 
+2.51.0
+

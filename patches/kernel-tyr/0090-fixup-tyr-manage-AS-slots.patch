@@ -1,0 +1,26 @@
+From 44b9a89a7c66edb49a205891bc0d3c59b423dc60 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Mon, 1 Sep 2025 14:56:15 +0200
+Subject: [PATCH 090/161] fixup!: tyr: manage AS slots
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ drivers/gpu/drm/tyr/mmu.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu.rs b/drivers/gpu/drm/tyr/mmu.rs
+index 46090bcea7..23c69778e2 100644
+--- a/drivers/gpu/drm/tyr/mmu.rs
++++ b/drivers/gpu/drm/tyr/mmu.rs
+@@ -178,7 +178,7 @@ fn enable_as(
+             op,
+             cond,
+             Delta::from_millis(0),
+-            Some(Delta::from_micros(200)),
++            Delta::from_micros(200),
+         )?;
+ 
+         as_command(as_nr)?.write(iomem, AS_COMMAND_UPDATE)?;
+-- 
+2.51.0
+

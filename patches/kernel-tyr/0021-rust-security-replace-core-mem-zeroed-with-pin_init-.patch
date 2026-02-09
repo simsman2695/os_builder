@@ -1,0 +1,34 @@
+From efd4f2842b120b3e809778472313e0fb7279e2cf Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:34 +0200
+Subject: [PATCH 021/161] rust: security: replace `core::mem::zeroed` with
+ `pin_init::zeroed`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/security.rs | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/rust/kernel/security.rs b/rust/kernel/security.rs
+index 0c63e9e7e5..11a6493525 100644
+--- a/rust/kernel/security.rs
++++ b/rust/kernel/security.rs
+@@ -25,8 +25,7 @@ impl SecurityCtx {
+     /// Get the security context given its id.
+     #[inline]
+     pub fn from_secid(secid: u32) -> Result<Self> {
+-        // SAFETY: `struct lsm_context` can be initialized to all zeros.
+-        let mut ctx: bindings::lsm_context = unsafe { core::mem::zeroed() };
++        let mut ctx: bindings::lsm_context = pin_init::zeroed();
+ 
+         // SAFETY: Just a C FFI call. The pointer is valid for writes.
+         to_result(unsafe { bindings::security_secid_to_secctx(secid, &mut ctx) })?;
+-- 
+2.51.0
+

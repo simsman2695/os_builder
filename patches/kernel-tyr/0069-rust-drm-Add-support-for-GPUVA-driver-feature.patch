@@ -1,0 +1,42 @@
+From 9b8b96b058c5249555aadb6936838b1502d5a3a6 Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Wed, 21 May 2025 13:04:40 +0200
+Subject: [PATCH 069/161] rust: drm: Add support for GPUVA driver feature
+
+This should be reworked by applying only those features that the driver
+supports.
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/kernel/drm/device.rs | 2 +-
+ rust/kernel/drm/driver.rs | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index c027ba79cb..05ed02c992 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -88,7 +88,7 @@ impl<T: drm::Driver> Device<T> {
+         name: T::INFO.name.as_char_ptr().cast_mut(),
+         desc: T::INFO.desc.as_char_ptr().cast_mut(),
+ 
+-        driver_features: drm::driver::FEAT_GEM,
++        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA,
+         ioctls: T::IOCTLS.as_ptr(),
+         num_ioctls: T::IOCTLS.len() as i32,
+         fops: &Self::GEM_FOPS,
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index 2500a61f45..23dd7ae1de 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -14,6 +14,7 @@
+ 
+ /// Driver use the GEM memory manager. This should be set for all modern drivers.
+ pub(crate) const FEAT_GEM: u32 = bindings::drm_driver_feature_DRIVER_GEM;
++pub(crate) const FEAT_GEM_GPUVA: u32 = bindings::drm_driver_feature_DRIVER_GEM_GPUVA;
+ 
+ /// Information data for a DRM Driver.
+ pub struct DriverInfo {
+-- 
+2.51.0
+

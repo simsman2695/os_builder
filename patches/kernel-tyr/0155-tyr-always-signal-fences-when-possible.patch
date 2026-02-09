@@ -1,0 +1,29 @@
+From c02492266557ab5a51f0a215e3e90abc08d2e44a Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Tue, 18 Nov 2025 16:32:39 -0300
+Subject: [PATCH 155/161] tyr: always signal fences when possible
+
+The previous check would stop completing fences on the first error, leading
+to timeouts. Even if there is an error, always signal fences when the sync
+object says we should do so.
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index db5913c5b4..e213bc97ab 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -268,9 +268,6 @@ fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+                 // because we cannot sleep in the signalling path.
+                 let mut res = Ok(());
+                 queue.in_flight_jobs.retain(|fence| {
+-                    if res.is_err() {
+-                        return true;
+-                    }
+                     if sync_obj.seqno < fence.seqno() {
+                         return true;
+                     }
+-- 
+2.51.0
+

@@ -1,0 +1,103 @@
+From 2630df5e0d014818f0f18a5da5c00f767ba74b6e Mon Sep 17 00:00:00 2001
+From: FUJITA Tomonori <fujita.tomonori@gmail.com>
+Date: Thu, 21 Aug 2025 09:20:54 +0900
+Subject: [PATCH 044/161] rust: Add cpu_relax() helper
+
+Add cpu_relax() helper in preparation for supporting
+read_poll_timeout().
+
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Reviewed-by: Andreas Hindborg <a.hindborg@kernel.org>
+Reviewed-by: Daniel Almeida <daniel.almeida@collabora.com>
+Signed-off-by: FUJITA Tomonori <fujita.tomonori@gmail.com>
+---
+ rust/helpers/helpers.c   |  1 +
+ rust/helpers/kernel.c    | 13 +++++++++++++
+ rust/helpers/processor.c |  8 ++++++++
+ rust/kernel/lib.rs       |  1 +
+ rust/kernel/processor.rs | 14 ++++++++++++++
+ 5 files changed, 37 insertions(+)
+ create mode 100644 rust/helpers/kernel.c
+ create mode 100644 rust/helpers/processor.c
+ create mode 100644 rust/kernel/processor.rs
+
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index 79c20b0987..8397364921 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -37,6 +37,7 @@
+ #include "pid_namespace.c"
+ #include "platform.c"
+ #include "poll.c"
++#include "processor.c"
+ #include "property.c"
+ #include "rbtree.c"
+ #include "rcu.c"
+diff --git a/rust/helpers/kernel.c b/rust/helpers/kernel.c
+new file mode 100644
+index 0000000000..9dff28f461
+--- /dev/null
++++ b/rust/helpers/kernel.c
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/kernel.h>
++
++void rust_helper_cpu_relax(void)
++{
++	cpu_relax();
++}
++
++void rust_helper___might_sleep_precision(const char *file, int len, int line)
++{
++	__might_sleep_precision(file, len, line);
++}
+diff --git a/rust/helpers/processor.c b/rust/helpers/processor.c
+new file mode 100644
+index 0000000000..d41355e14d
+--- /dev/null
++++ b/rust/helpers/processor.c
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/processor.h>
++
++void rust_helper_cpu_relax(void)
++{
++	cpu_relax();
++}
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index ee6ee54108..ed5dac4151 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -113,6 +113,7 @@
+ pub mod platform;
+ pub mod prelude;
+ pub mod print;
++pub mod processor;
+ pub mod rbtree;
+ pub mod regulator;
+ pub mod revocable;
+diff --git a/rust/kernel/processor.rs b/rust/kernel/processor.rs
+new file mode 100644
+index 0000000000..85b49b3614
+--- /dev/null
++++ b/rust/kernel/processor.rs
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! Processor related primitives.
++//!
++//! C header: [`include/linux/processor.h`](srctree/include/linux/processor.h)
++
++/// Lower CPU power consumption or yield to a hyperthreaded twin processor.
++///
++/// It also happens to serve as a compiler barrier.
++#[inline]
++pub fn cpu_relax() {
++    // SAFETY: Always safe to call.
++    unsafe { bindings::cpu_relax() }
++}
+-- 
+2.51.0
+

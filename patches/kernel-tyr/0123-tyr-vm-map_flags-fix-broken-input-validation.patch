@@ -1,0 +1,31 @@
+From caf62ef39ce1c19c0b2049a702048bde75ae2a60 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 09:29:09 -0300
+Subject: [PATCH 123/161] tyr: vm: map_flags: fix broken input validation
+
+---
+ drivers/gpu/drm/tyr/mmu/vm/map_flags.rs | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/map_flags.rs b/drivers/gpu/drm/tyr/mmu/vm/map_flags.rs
+index f9619293b1..3980ea9d5a 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/map_flags.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/map_flags.rs
+@@ -54,9 +54,12 @@ impl TryFrom<u32> for Flags {
+     type Error = Error;
+ 
+     fn try_from(value: u32) -> core::result::Result<Self, Self::Error> {
+-        let valid = Flags::from(READONLY) | Flags::from(NOEXEC) | Flags::from(UNCACHED);
++        let valid = (kernel::uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_MAP_READONLY
++            | kernel::uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_MAP_NOEXEC
++            | kernel::uapi::drm_panthor_vm_bind_op_flags_DRM_PANTHOR_VM_BIND_OP_MAP_UNCACHED)
++            as u32;
+ 
+-        if value & !valid.0 != 0 {
++        if value & !valid != 0 {
+             pr_err!("Invalid VM map flags: {:#x}\n", value);
+             Err(EINVAL)
+         } else {
+-- 
+2.51.0
+

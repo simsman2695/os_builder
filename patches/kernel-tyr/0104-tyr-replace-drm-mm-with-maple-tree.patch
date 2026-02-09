@@ -1,0 +1,172 @@
+From d408abce6424e641f13cf7df4659cfe0e17122b1 Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Tue, 29 Jul 2025 10:05:48 +0000
+Subject: [PATCH 104/161] tyr: replace drm::mm with maple tree
+
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/tyr/gem.rs          | 11 ++++-------
+ drivers/gpu/drm/tyr/mmu/vm.rs       | 30 +++++++----------------------
+ drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs |  5 ++---
+ 3 files changed, 13 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/gem.rs b/drivers/gpu/drm/tyr/gem.rs
+index 230b6e5b67..174be3dda9 100644
+--- a/drivers/gpu/drm/tyr/gem.rs
++++ b/drivers/gpu/drm/tyr/gem.rs
+@@ -6,12 +6,11 @@
+ use crate::driver::TyrDriver;
+ use crate::file::DrmFile;
+ use crate::mmu::vm;
+-use crate::mmu::vm::Vm;
++use crate::mmu::vm::{Vm, LiveRange};
+ use kernel::devres::Devres;
+ use kernel::drm::gem::shmem;
+ use kernel::drm::gem::BaseObject;
+ use kernel::drm::gem::{self};
+-use kernel::drm::mm;
+ use kernel::io::mem::IoMem;
+ use kernel::prelude::*;
+ use kernel::sync::Arc;
+@@ -32,7 +31,7 @@ enum ObjectType {
+     Kernel {
+         // Kernel objects have their VA managed by the MM allocator. This node
+         // represents the allocation.
+-        node: mm::Node<(), ()>,
++        node: LiveRange,
+     },
+ 
+     User,
+@@ -101,9 +100,7 @@ pub(crate) fn size(&self) -> usize {
+     /// any.
+     pub(crate) fn kernel_va(&self) -> Option<Range<u64>> {
+         match &self.gem.ty {
+-            ObjectType::Kernel { node } => {
+-                Some(node.start()..node.start() + node.size())
+-            }
++            ObjectType::Kernel { node } => Some(node.range()),
+             ObjectType::User => None,
+         }
+     }
+@@ -166,7 +163,7 @@ pub(crate) fn new_kernel_object(
+     va.align()?;
+     let sz = va.size();
+     let node = vm.lock().alloc_kernel_range(va)?;
+-    let range = node.start()..node.start() + node.size();
++    let range = node.range();
+ 
+     let gem = Object::new(
+         tdev,
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index 8d13e5a955..013a8dfff8 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -29,7 +29,6 @@
+ use kernel::devres::Devres;
+ use kernel::drm::gem::shmem;
+ use kernel::drm::gpuvm::ExecToken;
+-use kernel::drm::mm;
+ use kernel::io::mem::IoMem;
+ use kernel::io_pgtable::ARM64LPAES1;
+ use kernel::io_pgtable::{self};
+@@ -52,6 +51,7 @@
+ pub(crate) mod pool;
+ 
+ mod range;
++pub(crate) use self::range::{RangeAlloc, LiveRange};
+ 
+ // TODO: we need *all* of these in kernel::bindings.
+ const SZ_4G: u64 = 4 * kernel::bindings::SZ_1G as u64;
+@@ -75,9 +75,6 @@ pub(crate) struct Vm {
+     /// Whether this is the MCU VM.
+     pub(super) for_mcu: bool,
+ 
+-    /// The range to automatically allocate kernel VAs from, if requested.
+-    auto_kernel_va: Range<u64>,
+-
+     /// Whether this VM was destroyed by userspace.
+     ///
+     /// Destroyed VMs are unmapped and cannot be the target of map operations
+@@ -114,11 +111,7 @@ pub(super) fn create(
+ 
+         let va_range = if for_mcu { 0..SZ_4G } else { 0..full_va_range };
+ 
+-        let kernel_mm = mm::Allocator::new(
+-            layout.kernel.start,
+-            layout.kernel.end - layout.kernel.start,
+-            (),
+-        )?;
++        let kernel_mm = range::RangeAlloc::new(auto_kernel_va.start, auto_kernel_va.end, GFP_KERNEL)?;
+ 
+         let page_table = ARM64LPAES1::new(
+             pdev.as_ref(),
+@@ -149,7 +142,6 @@ pub(super) fn create(
+             memattr,
+             _layout: layout,
+             for_mcu,
+-            auto_kernel_va,
+             destroyed: false,
+         })
+     }
+@@ -158,25 +150,17 @@ pub(super) fn create(
+     ///
+     /// Kernel VAs are used for the FW, for synchronization objects, ring
+     /// buffers and other kernel-only data structures.
+-    pub(crate) fn alloc_kernel_range(&mut self, va: KernelVaPlacement) -> Result<mm::Node<(), ()>> {
+-        // stack_pin_init!(let local_guard = new_mutex!(()));
+-        // let mut locked_vm = self.gpuvm.lock(&mut local_guard.lock());
+-
++    pub(crate) fn alloc_kernel_range(&mut self, va: KernelVaPlacement) -> Result<LiveRange> {
+         match va {
+             KernelVaPlacement::Auto { size } => unsafe { self.gpuvm.as_inner_mut() }
+                 .kernel_mm
+-                .insert_node_in_range(
+-                    (),
+-                    size as u64,
+-                    4096,
+-                    0,
+-                    self.auto_kernel_va.start,
+-                    self.auto_kernel_va.end,
+-                    mm::InsertMode::Best,
++                .allocate(
++                    size,
++                    GFP_KERNEL
+                 ),
+             KernelVaPlacement::At(va) => unsafe { self.gpuvm.as_inner_mut() }
+                 .kernel_mm
+-                .reserve_node((), va.start, va.end - va.start, 0),
++                .insert(va.start, va.end, GFP_KERNEL),
+         }
+     }
+ 
+diff --git a/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs b/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
+index c11e07cb7a..35884ee2e3 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm/gpuvm.rs
+@@ -13,7 +13,6 @@
+ use kernel::devres::Devres;
+ use kernel::drm::gpuvm::DriverGpuVa;
+ use kernel::drm::gpuvm::{self};
+-use kernel::drm::mm;
+ use kernel::io::mem::IoMem;
+ use kernel::io_pgtable::IoPageTable;
+ use kernel::io_pgtable::ARM64LPAES1;
+@@ -84,13 +83,13 @@ pub(in crate::mmu) struct LockedVm {
+     pub(in crate::mmu) page_table: ARM64LPAES1<Mmu>,
+     /// The allocator keeping track of what ranges are in use for the kernel VA
+     /// range.
+-    pub(super) kernel_mm: mm::Allocator<(), ()>,
++    pub(super) kernel_mm: vm::range::RangeAlloc,
+ }
+ 
+ impl LockedVm {
+     pub(super) fn new(
+         page_table: ARM64LPAES1<Mmu>,
+-        kernel_mm: mm::Allocator<(), ()>,
++        kernel_mm: vm::range::RangeAlloc,
+     ) -> impl Init<Self> {
+         init!(LockedVm {
+             page_table,
+-- 
+2.51.0
+

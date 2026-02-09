@@ -1,0 +1,40 @@
+From ff7388dd5ae2ebe259b295a19731b364dd2451c8 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 19 Nov 2025 08:54:40 -0300
+Subject: [PATCH 158/161] tyr: give CSGs different priorities
+
+CSGs with the same priority tend to deadlock when fighting for GPU cores.
+---
+ drivers/gpu/drm/tyr/fw/global/csg.rs | 2 +-
+ drivers/gpu/drm/tyr/sched.rs         | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/fw/global/csg.rs b/drivers/gpu/drm/tyr/fw/global/csg.rs
+index 59722f20a5..c3596737cb 100644
+--- a/drivers/gpu/drm/tyr/fw/global/csg.rs
++++ b/drivers/gpu/drm/tyr/fw/global/csg.rs
+@@ -279,7 +279,7 @@ pub(crate) fn set_endpoint_req(
+         compute: u32,
+         fragment: u32,
+         tiler: u32,
+-        priority: Priority,
++        priority: usize,
+     ) {
+         self.csg_ep_req = constants::csg_ep_req_compute(compute)
+             | constants::csg_ep_req_fragment(fragment)
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index d3330a6529..71df46f0bb 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -360,7 +360,7 @@ pub(crate) fn program_csg_slot(
+             group.max_compute_cores.into(),
+             group.max_fragment_cores.into(),
+             group.max_tiler_cores.into(),
+-            priority,
++            csg_idx,
+         );
+ 
+         input.csg_config = as_nr;
+-- 
+2.51.0
+

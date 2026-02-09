@@ -1,0 +1,40 @@
+From e3072a70f30b9759017513d7db68b9a61be58bd0 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 10:43:52 -0300
+Subject: [PATCH 128/161] [HACK]: drm: add timeline syncobj support
+
+We need these, as we use a timeline syncobj to synchronize submissions
+on the userspace side.
+---
+ rust/kernel/drm/device.rs | 2 +-
+ rust/kernel/drm/driver.rs | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index 16bd7b9410..06d73a557d 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -88,7 +88,7 @@ impl<T: drm::Driver> Device<T> {
+         name: T::INFO.name.as_char_ptr().cast_mut(),
+         desc: T::INFO.desc.as_char_ptr().cast_mut(),
+ 
+-        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA | drm::driver::FEAT_SYNCOBJ | drm::driver::FEAT_RENDER,
++        driver_features: drm::driver::FEAT_GEM | drm::driver::FEAT_GEM_GPUVA | drm::driver::FEAT_SYNCOBJ | drm::driver::FEAT_RENDER | drm::driver::FEAT_SYNCOBJ_TIMELINE,
+         ioctls: T::IOCTLS.as_ptr(),
+         num_ioctls: T::IOCTLS.len() as i32,
+         fops: &Self::GEM_FOPS,
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index fd821850d8..dec41ff3f1 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -17,6 +17,7 @@
+ pub(crate) const FEAT_GEM_GPUVA: u32 = bindings::drm_driver_feature_DRIVER_GEM_GPUVA;
+ pub(crate) const FEAT_SYNCOBJ: u32 = bindings::drm_driver_feature_DRIVER_SYNCOBJ;
+ pub(crate) const FEAT_RENDER: u32 = bindings::drm_driver_feature_DRIVER_RENDER;
++pub(crate) const FEAT_SYNCOBJ_TIMELINE: u32 = bindings::drm_driver_feature_DRIVER_SYNCOBJ_TIMELINE;
+ 
+ /// Information data for a DRM Driver.
+ pub struct DriverInfo {
+-- 
+2.51.0
+

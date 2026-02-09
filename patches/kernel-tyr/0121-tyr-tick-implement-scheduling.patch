@@ -1,0 +1,165 @@
+From c95c059a75e586ac44c5933809fe1953043f34d9 Mon Sep 17 00:00:00 2001
+From: Andrew Ballance <andrewjballance@gmail.com>
+Date: Mon, 29 Sep 2025 01:36:08 -0500
+Subject: [PATCH 121/161] tyr: tick: implement scheduling
+
+implements a basic scheduler in tick. tick is queued whenever a group
+is marked idle. tick removes idle groups from csg slots and fills empty
+slots with runnable groups.
+
+Signed-off-by: Andrew Ballance <andrewjballance@gmail.com>
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 30 ++++++++++--
+ drivers/gpu/drm/tyr/sched/tick.rs   | 72 ++++++++++++++++++++++++++++-
+ 2 files changed, 97 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index 4c08de4b6e..dbf2ea6c6e 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -252,10 +252,12 @@ pub(crate) fn set_events(&mut self, tdev: &TyrDevice, events: u32) {
+ 
+     fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+         let mut no_in_flight_jobs = true;
++        let mut csg_id = None;
+ 
+         // TODO: we need to annotate this function with the dma signalling token.
+         // TODO: we cannot sleep in the signalling path.
+         group.with_locked_inner(|inner| {
++            csg_id = inner.csg_id;
+             for (queue_idx, queue) in inner.queues.iter_mut().enumerate() {
+                 let sync_offset = queue_idx * core::mem::size_of::<syncs::SyncObj64b>();
+                 let sync_obj = syncs::SyncObj64b::read(&mut inner.syncobjs, sync_offset)?;
+@@ -289,15 +291,35 @@ fn update_group(&mut self, group: Arc<Group>, data: &Arc<TyrData>) -> Result {
+         })?;
+ 
+         if no_in_flight_jobs {
+-            self.mark_group_idle(group, data)?;
++            self.mark_group_idle(group, data, csg_id)?;
+         }
+ 
+         Ok(())
+     }
+ 
+-    fn mark_group_idle(&mut self, group: Arc<Group>, data: &TyrData) -> Result {
+-        data.with_locked_mmu(|mmu| mmu.unbind_vm(&group.vm, &data.iomem))?;
+-        self.idle_groups[group.priority as usize].push(group, GFP_KERNEL)?;
++    fn mark_group_idle(
++        &mut self,
++        group: Arc<Group>,
++        data: &Arc<TyrData>,
++        csg_id: Option<usize>,
++    ) -> Result {
++        // data.with_locked_mmu(|mmu| mmu.unbind_vm(&group.vm, &data.iomem))?;
++        // self.idle_groups[group.priority as usize].push(group, GFP_KERNEL)?;
++        if let Some(csg_idx) = csg_id {
++            if let Some(slot) = &mut self.csg_slots[csg_idx] {
++                slot.idle = true;
++            } else {
++                pr_warn!("Cannot mark empty slot {} idle\n", csg_idx);
++            }
++        }
++
++        if let None = &self.resched_target {
++            self.resched_target = Some(kernel::time::Instant::now());
++            let arc: Arc<TyrData> = data.clone();
++            if self.wq.enqueue::<_, 1>(arc).is_err() {
++                pr_err!("Failed to enqueue tick work\n");
++            }
++        }
+         Ok(())
+     }
+ 
+diff --git a/drivers/gpu/drm/tyr/sched/tick.rs b/drivers/gpu/drm/tyr/sched/tick.rs
+index b1733ea3f9..f3544fa7a9 100644
+--- a/drivers/gpu/drm/tyr/sched/tick.rs
++++ b/drivers/gpu/drm/tyr/sched/tick.rs
+@@ -6,7 +6,10 @@
+ use kernel::workqueue::WorkItem;
+ 
+ use crate::driver::TyrData;
++use crate::fw::global::csg::Priority;
+ use crate::sched::group::Group;
++use crate::sched::group::State;
++use crate::sched::CommandStreamGroupSlot;
+ 
+ use super::Scheduler;
+ 
+@@ -31,6 +34,73 @@ impl WorkItem<1> for TyrData {
+     type Pointer = Arc<Self>;
+ 
+     fn run(this: Self::Pointer) {
+-        let _ = this.with_locked_scheduler(|_sched| Ok(()));
++        // the world's simplest scheduler.
++        // all this does is evict any idle group and fill any empty csg slot with
++        // groups from runnable_groups. any destroyed groups are removed from idle groups
++        let _ = this.with_locked_scheduler(|sched| {
++            let sg = kernel::types::ScopeGuard::new(|| pr_err!("an error occured in tick\n"));
++            let mut old_groups: [Option<CommandStreamGroupSlot>; 31] = [const { None }; 31];
++
++            let slot_count = sched.csg_slot_count as usize;
++
++            // sync group state for all queued groups
++            for i in 0..slot_count {
++                if let Some(slot) = &sched.csg_slots[i] {
++                    sched.sync_group_state(&this, i)?;
++                }
++            }
++
++            // keep any task that is not idle in the same slot
++            for i in 0..slot_count {
++                if let Some(slot) = &sched.csg_slots[i] {
++                    if slot.idle {
++                        old_groups[i] = Some(sched.unbind_group(&this, i)?);
++                    }
++                }
++            }
++
++            let priorities = [
++                Priority::RealTime,
++                Priority::High,
++                Priority::Medium,
++                Priority::Low,
++            ];
++            let mut index = 0;
++            // fill empty slots with runnable groups
++            'outer: for priority in priorities {
++                for i in 0..sched.runnable_groups[priority as usize].len() {
++                    while let Some(_) = sched.csg_slots[index] {
++                        index += 1;
++                        if index >= slot_count {
++                            break 'outer;
++                        }
++                    }
++                    let group = &sched.runnable_groups[priority as usize][i];
++                    let state = group.with_locked_inner(|inner| Ok(inner.state))?;
++                    if state == State::Active {
++                        continue;
++                    }
++                    sched.bind_group(&this, group.clone(), index)?;
++                    sched.program_csg_slot(&this, index, priority)?;
++                    sched.sync_group_state(&this, index)?;
++
++                    index += 1;
++                    if index >= slot_count {
++                        break 'outer;
++                    }
++                }
++            }
++
++            // drop destroyed groups
++            for priority in priorities {
++                sched.idle_groups[priority as usize].retain(|group| {
++                    group.with_locked_inner(|inner| Ok(inner.destroyed)) != Ok(true)
++                });
++            }
++            sched.resched_target = None;
++            sg.dismiss();
++
++            Ok(())
++        });
+     }
+ }
+-- 
+2.51.0
+

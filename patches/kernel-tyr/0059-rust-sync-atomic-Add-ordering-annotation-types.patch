@@ -1,0 +1,155 @@
+From dd12bf0be768aec2af553e852e05ec159edb323e Mon Sep 17 00:00:00 2001
+From: Boqun Feng <boqun.feng@gmail.com>
+Date: Mon, 21 Apr 2025 09:42:12 -0700
+Subject: [PATCH 059/161] rust: sync: atomic: Add ordering annotation types
+
+Preparation for atomic primitives. Instead of a suffix like _acquire, a
+method parameter along with the corresponding generic parameter will be
+used to specify the ordering of an atomic operations. For example,
+atomic load() can be defined as:
+
+	impl<T: ...> Atomic<T> {
+	    pub fn load<O: AcquireOrRelaxed>(&self, _o: O) -> T { ... }
+	}
+
+and acquire users would do:
+
+	let r = x.load(Acquire);
+
+relaxed users:
+
+	let r = x.load(Relaxed);
+
+doing the following:
+
+	let r = x.load(Release);
+
+will cause a compiler error.
+
+Compared to suffixes, it's easier to tell what ordering variants an
+operation has, and it also make it easier to unify the implementation of
+all ordering variants in one method via generic. The `IS_RELAXED` and
+`ORDER` associate consts are for generic function to pick up the
+particular implementation specified by an ordering annotation.
+
+Signed-off-by: Boqun Feng <boqun.feng@gmail.com>
+---
+ rust/kernel/sync/atomic.rs          |  3 +
+ rust/kernel/sync/atomic/ordering.rs | 94 +++++++++++++++++++++++++++++
+ 2 files changed, 97 insertions(+)
+ create mode 100644 rust/kernel/sync/atomic/ordering.rs
+
+diff --git a/rust/kernel/sync/atomic.rs b/rust/kernel/sync/atomic.rs
+index 65e41dba97..9fe5d81fc2 100644
+--- a/rust/kernel/sync/atomic.rs
++++ b/rust/kernel/sync/atomic.rs
+@@ -17,3 +17,6 @@
+ //! [`LKMM`]: srctree/tools/memory-mode/
+ 
+ pub mod ops;
++pub mod ordering;
++
++pub use ordering::{Acquire, Full, Relaxed, Release};
+diff --git a/rust/kernel/sync/atomic/ordering.rs b/rust/kernel/sync/atomic/ordering.rs
+new file mode 100644
+index 0000000000..6cf01cd276
+--- /dev/null
++++ b/rust/kernel/sync/atomic/ordering.rs
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! Memory orderings.
++//!
++//! The semantics of these orderings follows the [`LKMM`] definitions and rules.
++//!
++//! - [`Acquire`] and [`Release`] are similar to their counterpart in Rust memory model.
++//! - [`Full`] means "fully-ordered", that is:
++//!   - It provides ordering between all the preceding memory accesses and the annotated operation.
++//!   - It provides ordering between the annotated operation and all the following memory accesses.
++//!   - It provides ordering between all the preceding memory accesses and all the fllowing memory
++//!     accesses.
++//!   - All the orderings are the same strong as a full memory barrier (i.e. `smp_mb()`).
++//! - [`Relaxed`] is similar to the counterpart in Rust memory model, except that dependency
++//!   orderings are also honored in [`LKMM`]. Dependency orderings are described in "DEPENDENCY
++//!   RELATIONS" in [`LKMM`]'s [`explanation`].
++//!
++//! [`LKMM`]: srctree/tools/memory-model/
++//! [`explanation`]: srctree/tools/memory-model/Documentation/explanation.txt
++
++/// The annotation type for relaxed memory ordering.
++pub struct Relaxed;
++
++/// The annotation type for acquire memory ordering.
++pub struct Acquire;
++
++/// The annotation type for release memory ordering.
++pub struct Release;
++
++/// The annotation type for fully-order memory ordering.
++pub struct Full;
++
++/// The trait bound for operations that only support relaxed ordering.
++pub trait RelaxedOnly {}
++
++impl RelaxedOnly for Relaxed {}
++
++/// The trait bound for operations that only support acquire or relaxed ordering.
++pub trait AcquireOrRelaxed {
++    /// Describes whether an ordering is relaxed or not.
++    const IS_RELAXED: bool = false;
++}
++
++impl AcquireOrRelaxed for Acquire {}
++
++impl AcquireOrRelaxed for Relaxed {
++    const IS_RELAXED: bool = true;
++}
++
++/// The trait bound for operations that only support release or relaxed ordering.
++pub trait ReleaseOrRelaxed {
++    /// Describes whether an ordering is relaxed or not.
++    const IS_RELAXED: bool = false;
++}
++
++impl ReleaseOrRelaxed for Release {}
++
++impl ReleaseOrRelaxed for Relaxed {
++    const IS_RELAXED: bool = true;
++}
++
++/// Describes the exact memory ordering of an `impl` [`All`].
++pub enum OrderingDesc {
++    /// Relaxed ordering.
++    Relaxed,
++    /// Acquire ordering.
++    Acquire,
++    /// Release ordering.
++    Release,
++    /// Fully-ordered.
++    Full,
++}
++
++/// The trait bound for annotating operations that should support all orderings.
++pub trait All {
++    /// Describes the exact memory ordering.
++    const ORDER: OrderingDesc;
++}
++
++impl All for Relaxed {
++    const ORDER: OrderingDesc = OrderingDesc::Relaxed;
++}
++
++impl All for Acquire {
++    const ORDER: OrderingDesc = OrderingDesc::Acquire;
++}
++
++impl All for Release {
++    const ORDER: OrderingDesc = OrderingDesc::Release;
++}
++
++impl All for Full {
++    const ORDER: OrderingDesc = OrderingDesc::Full;
++}
+-- 
+2.51.0
+

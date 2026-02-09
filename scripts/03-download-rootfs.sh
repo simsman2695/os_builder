@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 03-download-rootfs.sh — download Ubuntu 24.04 arm64 base tarball
+# 03-download-rootfs.sh — download Ubuntu arm64 base tarball
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 

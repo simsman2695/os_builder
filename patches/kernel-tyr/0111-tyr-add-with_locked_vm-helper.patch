@@ -1,0 +1,253 @@
+From 1aeb3bd6e28902400507142d902e9badd742f8d4 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Thu, 16 Oct 2025 13:54:51 -0300
+Subject: [PATCH 111/161] tyr: add with_locked_vm() helper
+
+---
+ drivers/gpu/drm/tyr/fw.rs          |  7 +++++--
+ drivers/gpu/drm/tyr/fw/parse.rs    |  7 ++++---
+ drivers/gpu/drm/tyr/gem.rs         |  6 +++---
+ drivers/gpu/drm/tyr/mmu/vm.rs      | 21 +++++++++++++++++++++
+ drivers/gpu/drm/tyr/sched.rs       | 17 ++++++++++-------
+ drivers/gpu/drm/tyr/sched/group.rs | 19 ++++++++++++-------
+ drivers/gpu/drm/tyr/sched/queue.rs | 22 +++++++++++++---------
+ 7 files changed, 68 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/fw.rs b/drivers/gpu/drm/tyr/fw.rs
+index 88a862170e..0d57845b9c 100644
+--- a/drivers/gpu/drm/tyr/fw.rs
++++ b/drivers/gpu/drm/tyr/fw.rs
+@@ -21,6 +21,7 @@
+ use crate::mmu::vm::map_flags;
+ use crate::mmu::vm::Vm;
+ use crate::mmu::vm::VmLayout;
++use crate::mmu::vm::WithLockedVm;
+ use crate::mmu::Mmu;
+ use crate::wait::Wait;
+ use crate::wait::WaitResult;
+@@ -255,7 +256,8 @@ pub(crate) fn alloc_queue_mem(&self, tdev: &TyrDevice) -> Result<ObjectRef> {
+             map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED);
+         let va = KernelVaPlacement::Auto { size: SZ_8K };
+ 
+-        gem::new_kernel_object(tdev, tdev.iomem.clone(), self.vm.clone(), va, flags)
++        self.vm
++            .with_lock_taken(|vm| gem::new_kernel_object(tdev, tdev.iomem.clone(), vm, va, flags))
+     }
+ 
+     pub(crate) fn alloc_suspend_buf(
+@@ -266,7 +268,8 @@ pub(crate) fn alloc_suspend_buf(
+         let flags = map_flags::Flags::from(map_flags::NOEXEC);
+         let va = KernelVaPlacement::Auto { size: suspend_size };
+ 
+-        gem::new_kernel_object(tdev, tdev.iomem.clone(), self.vm.clone(), va, flags)
++        self.vm
++            .with_lock_taken(|vm| gem::new_kernel_object(tdev, tdev.iomem.clone(), vm, va, flags))
+     }
+ 
+     /// Provide access to the global interface, but as a closure so we can at
+diff --git a/drivers/gpu/drm/tyr/fw/parse.rs b/drivers/gpu/drm/tyr/fw/parse.rs
+index 10c9feded7..fb0a1114ba 100644
+--- a/drivers/gpu/drm/tyr/fw/parse.rs
++++ b/drivers/gpu/drm/tyr/fw/parse.rs
+@@ -356,8 +356,9 @@ pub(super) fn read_sections(
+ 
+         let mut sections = KVec::new();
+ 
++        let mut vm_guard = vm.lock();
+         while (cursor.pos() as u32) < fw_bin_hdr.size {
+-            let section = Self::read_entry(&mut cursor, tdev, iomem.clone(), &fw, vm.clone())?;
++            let section = Self::read_entry(&mut cursor, tdev, iomem.clone(), &fw, &mut vm_guard)?;
+             if let Some(inner) = section.inner {
+                 sections.push(inner, GFP_KERNEL)?;
+             }
+@@ -371,7 +372,7 @@ fn read_entry(
+         tdev: &TyrDevice,
+         iomem: Arc<Devres<IoMem>>,
+         fw: &kernel::firmware::Firmware,
+-        vm: Arc<Mutex<Vm>>,
++        vm: &mut Vm,
+     ) -> Result<BinaryEntrySection> {
+         let section = BinaryEntrySection {
+             hdr: BinaryEntryHeader(cursor.read_u32(tdev)?),
+@@ -457,7 +458,7 @@ fn read_section(
+         iomem: Arc<Devres<IoMem>>,
+         cursor: &mut Cursor<'_>,
+         fw: &kernel::firmware::Firmware,
+-        vm: Arc<Mutex<Vm>>,
++        vm: &mut Vm,
+     ) -> Result<Option<KBox<Section>>> {
+         let hdr = BinarySectionEntryHeader::new(tdev, cursor)?;
+ 
+diff --git a/drivers/gpu/drm/tyr/gem.rs b/drivers/gpu/drm/tyr/gem.rs
+index 0b158d1ffc..2eb3ed9c2d 100644
+--- a/drivers/gpu/drm/tyr/gem.rs
++++ b/drivers/gpu/drm/tyr/gem.rs
+@@ -145,13 +145,13 @@ pub(crate) fn lookup_handle(file: &DrmFile, handle: u32) -> Result<ObjectRef> {
+ pub(crate) fn new_kernel_object(
+     tdev: &TyrDevice,
+     iomem: Arc<Devres<IoMem>>,
+-    vm: Arc<Mutex<Vm>>,
++    vm: &mut Vm,
+     mut va: KernelVaPlacement,
+     flags: vm::map_flags::Flags,
+ ) -> Result<ObjectRef> {
+     va.align()?;
+     let sz = va.size();
+-    let node = vm.lock().alloc_kernel_range(va)?;
++    let node = vm.alloc_kernel_range(va)?;
+     let range = node.range();
+ 
+     let gem = Object::new(
+@@ -167,7 +167,7 @@ pub(crate) fn new_kernel_object(
+         },
+     )?;
+ 
+-    vm.lock().bind_gem(iomem, &gem, 0, range, flags)?;
++    vm.bind_gem(iomem, &gem, 0, range, flags)?;
+ 
+     Ok(ObjectRef::new(gem))
+ }
+diff --git a/drivers/gpu/drm/tyr/mmu/vm.rs b/drivers/gpu/drm/tyr/mmu/vm.rs
+index cb013814aa..2d832af39f 100644
+--- a/drivers/gpu/drm/tyr/mmu/vm.rs
++++ b/drivers/gpu/drm/tyr/mmu/vm.rs
+@@ -36,6 +36,7 @@
+ use kernel::prelude::*;
+ use kernel::sizes::SZ_4K;
+ use kernel::sync::Arc;
++use kernel::sync::Mutex;
+ use kernel::types::ARef;
+ 
+ use crate::driver::TyrDevice;
+@@ -362,3 +363,23 @@ fn mair_to_memattr(mair: u64) -> u64 {
+ 
+     memattr
+ }
++
++/// Extension trait for `Arc<Mutex<Vm>>` to provide convenient locked access.
++pub(crate) trait WithLockedVm {
++    /// Execute a function with the VM locked.
++    ///
++    /// This is implemented as a closure to reduce the scope of the VM lock.
++    fn with_lock_taken<F, R>(&self, f: F) -> Result<R>
++    where
++        F: FnOnce(&mut Vm) -> Result<R>;
++}
++
++impl WithLockedVm for Arc<Mutex<Vm>> {
++    fn with_lock_taken<F, R>(&self, f: F) -> Result<R>
++    where
++        F: FnOnce(&mut Vm) -> Result<R>,
++    {
++        let mut vm = self.lock();
++        f(&mut vm)
++    }
++}
+diff --git a/drivers/gpu/drm/tyr/sched.rs b/drivers/gpu/drm/tyr/sched.rs
+index 16b3e8d8ea..9e8ad7938b 100644
+--- a/drivers/gpu/drm/tyr/sched.rs
++++ b/drivers/gpu/drm/tyr/sched.rs
+@@ -25,6 +25,7 @@
+ use crate::fw::global::csg::MAX_CSGS;
+ use crate::fw::SharedSectionEntry;
+ use crate::gem;
++use crate::mmu::vm::WithLockedVm;
+ use crate::TyrDriver;
+ 
+ mod events;
+@@ -357,13 +358,15 @@ pub(crate) fn issue_dummy_instr(&mut self, group: Arc<Group>, tdev: &TyrDevice)
+         let flags =
+             map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED);
+ 
+-        let mut debug_gem = gem::new_kernel_object(
+-            tdev,
+-            iomem,
+-            group.vm.clone(),
+-            gem::KernelVaPlacement::Auto { size: SZ_4K },
+-            flags,
+-        )?;
++        let mut debug_gem = group.vm.with_lock_taken(|vm| {
++            gem::new_kernel_object(
++                tdev,
++                iomem,
++                vm,
++                gem::KernelVaPlacement::Auto { size: SZ_4K },
++                flags,
++            )
++        })?;
+ 
+         let mut instrs = kvec![];
+ 
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index 972fb1b180..b68b4a1f96 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -23,6 +23,7 @@
+ use crate::mmu::vm::map_flags;
+ use crate::mmu::vm::PreparedVm;
+ use crate::mmu::vm::Vm;
++use crate::mmu::vm::WithLockedVm;
+ use crate::sched::syncs::SyncObj64b;
+ use crate::TyrDriver;
+ 
+@@ -206,13 +207,17 @@ pub(super) fn create(
+         let protm_suspend_buf = fw.alloc_suspend_buf(tdev, protm_suspend_buf_size as usize)?;
+ 
+         let num_syncs = group_args.queues.count as usize * core::mem::size_of::<SyncObj64b>();
+-        let mut syncobjs = gem::new_kernel_object(
+-            tdev,
+-            tdev.iomem.clone(),
+-            vm.clone(),
+-            gem::KernelVaPlacement::Auto { size: num_syncs },
+-            map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED),
+-        )?;
++        let mut syncobjs = {
++            let mut vm_guard = vm.lock();
++            gem::new_kernel_object(
++                tdev,
++                tdev.iomem.clone(),
++                &mut vm_guard,
++                gem::KernelVaPlacement::Auto { size: num_syncs },
++                map_flags::Flags::from(map_flags::NOEXEC)
++                    | map_flags::Flags::from(map_flags::UNCACHED),
++            )?
++        };
+ 
+         let vmap = syncobjs.vmap()?;
+         vmap.as_mut_slice().fill(0);
+diff --git a/drivers/gpu/drm/tyr/sched/queue.rs b/drivers/gpu/drm/tyr/sched/queue.rs
+index 6091493aef..856b13ab8b 100644
+--- a/drivers/gpu/drm/tyr/sched/queue.rs
++++ b/drivers/gpu/drm/tyr/sched/queue.rs
+@@ -113,15 +113,19 @@ pub(crate) fn new(
+         let entity = Entity::new(&scheduler, sched::Priority::Kernel)?;
+ 
+         let iomem = tdev.iomem.clone();
+-        let ringbuf = gem::new_kernel_object(
+-            tdev,
+-            iomem.clone(),
+-            vm.clone(),
+-            gem::KernelVaPlacement::Auto {
+-                size: queue_args.ringbuf_size as usize,
+-            },
+-            map_flags::Flags::from(map_flags::NOEXEC) | map_flags::Flags::from(map_flags::UNCACHED),
+-        )?;
++        let ringbuf = {
++            let mut vm_guard = vm.lock();
++            gem::new_kernel_object(
++                tdev,
++                iomem.clone(),
++                &mut vm_guard,
++                gem::KernelVaPlacement::Auto {
++                    size: queue_args.ringbuf_size as usize,
++                },
++                map_flags::Flags::from(map_flags::NOEXEC)
++                    | map_flags::Flags::from(map_flags::UNCACHED),
++            )?
++        };
+ 
+         let mem = tdev.fw.alloc_queue_mem(tdev)?;
+ 
+-- 
+2.51.0
+

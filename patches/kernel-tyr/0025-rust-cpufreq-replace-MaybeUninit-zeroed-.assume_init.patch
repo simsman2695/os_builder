@@ -1,0 +1,42 @@
+From c2306501032953c3981fb45a75c4b135c6d60c78 Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:38 +0200
+Subject: [PATCH 025/161] rust: cpufreq: replace
+ `MaybeUninit::zeroed().assume_init()` with `pin_init::zeroed()`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/cpufreq.rs | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/rust/kernel/cpufreq.rs b/rust/kernel/cpufreq.rs
+index afc15e72a7..be2dffbdb5 100644
+--- a/rust/kernel/cpufreq.rs
++++ b/rust/kernel/cpufreq.rs
+@@ -27,7 +27,6 @@
+ use core::{
+     cell::UnsafeCell,
+     marker::PhantomData,
+-    mem::MaybeUninit,
+     ops::{Deref, DerefMut},
+     pin::Pin,
+     ptr,
+@@ -1013,8 +1012,7 @@ impl<T: Driver> Registration<T> {
+         } else {
+             None
+         },
+-        // SAFETY: All zeros is a valid value for `bindings::cpufreq_driver`.
+-        ..unsafe { MaybeUninit::zeroed().assume_init() }
++        ..pin_init::zeroed()
+     };
+ 
+     const fn copy_name(name: &'static CStr) -> [c_char; CPUFREQ_NAME_LEN] {
+-- 
+2.51.0
+

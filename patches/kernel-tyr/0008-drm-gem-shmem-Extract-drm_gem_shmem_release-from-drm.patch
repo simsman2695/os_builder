@@ -1,0 +1,86 @@
+From f71c59517e57e90334e5b8adf39315d4462dd289 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 29 Aug 2025 18:35:23 -0400
+Subject: [PATCH 008/161] drm/gem/shmem: Extract drm_gem_shmem_release() from
+ drm_gem_shmem_free()
+
+At the moment the way that freeing gem shmem objects is not ideal for rust
+bindings. drm_gem_shmem_free() releases all of the associated memory with a
+gem shmem object with kfree(), which means that for us to correctly release
+a gem shmem object in rust we have to manually drop all of the contents of
+our gem object structure in-place by hand before finally calling
+drm_gem_shmem_free() to release the shmem resources and the allocation for
+the gem object.
+
+Since the only reason this is an issue is because of drm_gem_shmem_free()
+calling kfree(), we can fix this by splitting drm_gem_shmem_free() out into
+itself and drm_gem_shmem_release(), where drm_gem_shmem_release() releases
+the various gem shmem resources without freeing the structure itself. With
+this, we can safely re-acquire the KBox for the gem object's memory
+allocation and let rust handle cleaning up all of the other struct members
+automatically.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ drivers/gpu/drm/drm_gem_shmem_helper.c | 23 ++++++++++++++++++-----
+ include/drm/drm_gem_shmem_helper.h     |  1 +
+ 2 files changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_gem_shmem_helper.c b/drivers/gpu/drm/drm_gem_shmem_helper.c
+index b20a7b75c7..50594cf8e1 100644
+--- a/drivers/gpu/drm/drm_gem_shmem_helper.c
++++ b/drivers/gpu/drm/drm_gem_shmem_helper.c
+@@ -175,13 +175,13 @@ struct drm_gem_shmem_object *drm_gem_shmem_create_with_mnt(struct drm_device *de
+ EXPORT_SYMBOL_GPL(drm_gem_shmem_create_with_mnt);
+ 
+ /**
+- * drm_gem_shmem_free - Free resources associated with a shmem GEM object
+- * @shmem: shmem GEM object to free
++ * drm_gem_shmem_release - Release resources associated with a shmem GEM object.
++ * @shmem: shmem GEM object
+  *
+- * This function cleans up the GEM object state and frees the memory used to
+- * store the object itself.
++ * This function cleans up the GEM object state, but does not free the memory used to store the
++ * object itself. This function is meant to be a dedicated helper for the Rust GEM bindings.
+  */
+-void drm_gem_shmem_free(struct drm_gem_shmem_object *shmem)
++void drm_gem_shmem_release(struct drm_gem_shmem_object *shmem)
+ {
+ 	struct drm_gem_object *obj = &shmem->base;
+ 
+@@ -208,6 +208,19 @@ void drm_gem_shmem_free(struct drm_gem_shmem_object *shmem)
+ 	}
+ 
+ 	drm_gem_object_release(obj);
++}
++EXPORT_SYMBOL_GPL(drm_gem_shmem_release);
++
++/**
++ * drm_gem_shmem_free - Free resources associated with a shmem GEM object
++ * @shmem: shmem GEM object to free
++ *
++ * This function cleans up the GEM object state and frees the memory used to
++ * store the object itself.
++ */
++void drm_gem_shmem_free(struct drm_gem_shmem_object *shmem)
++{
++	drm_gem_shmem_release(shmem);
+ 	kfree(shmem);
+ }
+ EXPORT_SYMBOL_GPL(drm_gem_shmem_free);
+diff --git a/include/drm/drm_gem_shmem_helper.h b/include/drm/drm_gem_shmem_helper.h
+index 235dc33127..589f7bfe75 100644
+--- a/include/drm/drm_gem_shmem_helper.h
++++ b/include/drm/drm_gem_shmem_helper.h
+@@ -112,6 +112,7 @@ struct drm_gem_shmem_object *drm_gem_shmem_create(struct drm_device *dev, size_t
+ struct drm_gem_shmem_object *drm_gem_shmem_create_with_mnt(struct drm_device *dev,
+ 							   size_t size,
+ 							   struct vfsmount *gemfs);
++void drm_gem_shmem_release(struct drm_gem_shmem_object *shmem);
+ void drm_gem_shmem_free(struct drm_gem_shmem_object *shmem);
+ 
+ void drm_gem_shmem_put_pages_locked(struct drm_gem_shmem_object *shmem);
+-- 
+2.51.0
+

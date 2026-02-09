@@ -1,0 +1,82 @@
+From 3be43363fe791850b840de2e4e56eb6ccb5e7b5e Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Wed, 20 Aug 2025 16:53:43 +0200
+Subject: [PATCH 076/161] rust: alloc: kvec: implement AsPageIter for VVec
+
+Implement AsPageIter for VVec; this allows to iterate and borrow the
+backing pages of a VVec. This, for instance, is useful in combination
+with VVec backing a scatterlist.
+
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+Tested-by: Alexandre Courbot <acourbot@nvidia.com>
+Reviewed-by: Daniel Almeida <daniel.almeida@collabora.com>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/alloc/kvec.rs | 40 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/alloc/kvec.rs b/rust/kernel/alloc/kvec.rs
+index 3c72e0bddd..ac438e70a1 100644
+--- a/rust/kernel/alloc/kvec.rs
++++ b/rust/kernel/alloc/kvec.rs
+@@ -3,10 +3,11 @@
+ //! Implementation of [`Vec`].
+ 
+ use super::{
+-    allocator::{KVmalloc, Kmalloc, Vmalloc},
++    allocator::{KVmalloc, Kmalloc, Vmalloc, VmallocPageIter},
+     layout::ArrayLayout,
+     AllocError, Allocator, Box, Flags,
+ };
++use crate::page::AsPageIter;
+ use core::{
+     borrow::{Borrow, BorrowMut},
+     fmt,
+@@ -1017,6 +1018,43 @@ fn into_iter(self) -> Self::IntoIter {
+     }
+ }
+ 
++/// # Examples
++///
++/// ```
++/// # use kernel::prelude::*;
++/// use kernel::alloc::allocator::VmallocPageIter;
++/// use kernel::page::{AsPageIter, PAGE_SIZE};
++///
++/// let mut vec = VVec::<u8>::new();
++///
++/// assert!(vec.page_iter().next().is_none());
++///
++/// vec.reserve(PAGE_SIZE, GFP_KERNEL)?;
++///
++/// let page = vec.page_iter().next().expect("At least one page should be available.\n");
++///
++/// // SAFETY: There is no concurrent read or write to the same page.
++/// unsafe { page.fill_zero_raw(0, PAGE_SIZE)? };
++/// # Ok::<(), Error>(())
++/// ```
++impl<T> AsPageIter for VVec<T> {
++    type Iter<'a>
++        = VmallocPageIter<'a>
++    where
++        T: 'a;
++
++    fn page_iter(&mut self) -> Self::Iter<'_> {
++        let ptr = self.ptr.cast();
++        let size = self.layout.size();
++
++        // SAFETY:
++        // - `ptr` is a valid pointer to the beginning of a `Vmalloc` allocation.
++        // - `ptr` is guaranteed to be valid for the lifetime of `'a`.
++        // - `size` is the size of the `Vmalloc` allocation `ptr` points to.
++        unsafe { VmallocPageIter::new(ptr, size) }
++    }
++}
++
+ /// An [`Iterator`] implementation for [`Vec`] that moves elements out of a vector.
+ ///
+ /// This structure is created by the [`Vec::into_iter`] method on [`Vec`] (provided by the
+-- 
+2.51.0
+

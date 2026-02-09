@@ -1,0 +1,110 @@
+From 464ecb08e10a73b64819c3d386767549d0e36130 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 29 Oct 2025 15:46:26 -0300
+Subject: [PATCH 149/161] tyr: support multiple queue_submits
+
+---
+ drivers/gpu/drm/tyr/file.rs        |  5 -----
+ drivers/gpu/drm/tyr/sched/deps.rs  | 11 ++++++++---
+ drivers/gpu/drm/tyr/sched/group.rs | 17 +++++++++++------
+ drivers/gpu/drm/tyr/sched/job.rs   |  4 ++++
+ 4 files changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 14d3ff2b9f..07a8bef50a 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -522,11 +522,6 @@ pub(crate) fn group_submit(
+             return Err(EINVAL);
+         }
+ 
+-        if groupsubmit.queue_submits.count > 1 {
+-            pr_err!("We do not support multiple queue submits yet");
+-            return Err(ENOTSUPP);
+-        }
+-
+         let mut reader = UserSlice::new(
+             UserPtr::from_addr(groupsubmit.queue_submits.array as usize),
+             groupsubmit.queue_submits.stride as usize * groupsubmit.queue_submits.count as usize,
+diff --git a/drivers/gpu/drm/tyr/sched/deps.rs b/drivers/gpu/drm/tyr/sched/deps.rs
+index bc3ff82e91..2e72d181dc 100644
+--- a/drivers/gpu/drm/tyr/sched/deps.rs
++++ b/drivers/gpu/drm/tyr/sched/deps.rs
+@@ -236,20 +236,25 @@ pub(crate) fn collect_signal_ops(&mut self, syncops: &[SyncOp]) -> Result {
+ 
+     /// Add jobs dependencies, arm jobs, and push them to the scheduler
+     ///
+-    /// This method takes the entity as a parameter, processes all jobs, and pushes them
+-    /// immediately to avoid lifetime conflicts.
++    /// This method takes the entity as a parameter, processes jobs for the specified
++    /// queue_idx, and pushes them immediately to avoid lifetime conflicts.
+     ///
+     /// Returns a vector of finished fences that need to be added to reservation objects.
+     pub(crate) fn add_deps_and_push_jobs(
+         &mut self,
+         entity: &mut Entity<Job>,
++        queue_idx: usize,
+     ) -> Result<KVec<Fence>> {
+         let mut finished_fences = KVec::new();
+ 
+         for job_idx in 0..self.jobs.len() {
+             // Only process GPU jobs with this entity
+             match &self.jobs[job_idx].state {
+-                JobState::Pending(JobType::Gpu(_)) => {}
++                JobState::Pending(JobType::Gpu(job)) => {
++                    if job.queue_idx() != queue_idx {
++                        continue;
++                    }
++                }
+                 JobState::Pending(JobType::VmBind(_)) => continue,
+                 JobState::Taken => continue,
+             }
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index 3e03631a6b..efdab4a573 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -312,15 +312,20 @@ pub(super) fn submit(
+ 
+             ctx.collect_signal_ops(&internal_syncs)?;
+ 
+-            // Now process jobs through their respective queue entities
+-            // For now, we assume single queue submit (as enforced in file.rs)
+-            // In the future, this will need to be extended to handle multiple queues
+-            if !queue_submits.is_empty() {
+-                let queue_idx = queue_submits[0].queue_index as usize;
++            // Collect unique queue indices from all queue submits
++            let mut queue_indices = kvec![];
++            for queue_submit in queue_submits.iter() {
++                let idx = queue_submit.queue_index as usize;
++                if !queue_indices.iter().any(|&qi| qi == idx) {
++                    queue_indices.push(idx, GFP_KERNEL)?;
++                }
++            }
+ 
++            // Process jobs for each queue
++            for &queue_idx in queue_indices.iter() {
+                 let finished_fences = self.with_locked_inner(|inner| {
+                     let queue = inner.queues.get_mut(queue_idx).ok_or(EINVAL)?;
+-                    ctx.add_deps_and_push_jobs(&mut queue.entity)
++                    ctx.add_deps_and_push_jobs(&mut queue.entity, queue_idx)
+                 })?;
+ 
+                 // Add the finished fences to the reservation objects
+diff --git a/drivers/gpu/drm/tyr/sched/job.rs b/drivers/gpu/drm/tyr/sched/job.rs
+index 1cf85973ac..6a16fa514d 100644
+--- a/drivers/gpu/drm/tyr/sched/job.rs
++++ b/drivers/gpu/drm/tyr/sched/job.rs
+@@ -77,6 +77,10 @@ pub(crate) fn create(
+             sync_addr,
+         })
+     }
++
++    pub(crate) fn queue_idx(&self) -> usize {
++        self.queue_idx
++    }
+ }
+ 
+ impl JobImpl for Job {
+-- 
+2.51.0
+

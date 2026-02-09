@@ -1,0 +1,28 @@
+From 56fd3c613e2f62ca5cadcd74991ba8e8d9983fdc Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 16 Nov 2024 09:50:59 +0100
+Subject: [PATCH 054/161] rust: drm: sched: Use &mut for ArmedJob.fences()
+
+Fixes build error after Box -> KBox conversion.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ rust/kernel/drm/sched.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/sched.rs b/rust/kernel/drm/sched.rs
+index 2318019f72..c9252dbb0e 100644
+--- a/rust/kernel/drm/sched.rs
++++ b/rust/kernel/drm/sched.rs
+@@ -176,7 +176,7 @@ fn deref_mut(&mut self) -> &mut Self::Target {
+ 
+ impl<'a, T: JobImpl> ArmedJob<'a, T> {
+     /// Returns the job fences
+-    pub fn fences(&self) -> JobFences<'_> {
++    pub fn fences(&mut self) -> JobFences<'_> {
+         // SAFETY: s_fence is always a valid drm_sched_fence pointer
+         JobFences(unsafe { &mut *self.0.job.s_fence })
+     }
+-- 
+2.51.0
+

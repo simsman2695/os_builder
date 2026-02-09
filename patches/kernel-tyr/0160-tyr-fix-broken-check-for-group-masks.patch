@@ -1,0 +1,37 @@
+From a174483e712ee48361d77fa0d14ebc90ae1ec967 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 19 Nov 2025 09:37:03 -0300
+Subject: [PATCH 160/161] tyr: fix broken check for group masks
+
+The uAPI file says we need to have at least the same max_*_cores set, but
+the check in GROUP_CREATE was inverted.
+
+In particular, this kills this ioctl for a few programs, including vkcube,
+which obviously makes them not run.
+---
+ drivers/gpu/drm/tyr/sched/group.rs | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index efdab4a573..ca20e05157 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -151,11 +151,11 @@ pub(super) fn create(
+             return Err(EINVAL);
+         }
+ 
+-        if group_args.compute_core_mask.count_ones() > group_args.max_compute_cores as u32
+-            || group_args.fragment_core_mask.count_ones() > group_args.max_fragment_cores as u32
+-            || group_args.tiler_core_mask.count_ones() > group_args.max_tiler_cores as u32
++        if group_args.compute_core_mask.count_ones() < group_args.max_compute_cores as u32
++            || group_args.fragment_core_mask.count_ones() < group_args.max_fragment_cores as u32
++            || group_args.tiler_core_mask.count_ones() < group_args.max_tiler_cores as u32
+         {
+-            pr_err!("group_create: asking for more cores than the maximum allowed for the group");
++            pr_err!("group_create: core mask must have at least max_cores bits set");
+             return Err(EINVAL);
+         }
+ 
+-- 
+2.51.0
+

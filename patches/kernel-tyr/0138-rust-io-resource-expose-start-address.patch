@@ -1,0 +1,28 @@
+From c6cee94c30dbf9cd9da4563f01c369d388250474 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Fri, 24 Oct 2025 15:48:03 -0300
+Subject: [PATCH 138/161] rust: io: resource: expose start address
+
+---
+ rust/kernel/io/mem.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/rust/kernel/io/mem.rs b/rust/kernel/io/mem.rs
+index 6f99510bfc..b02c8fba46 100644
+--- a/rust/kernel/io/mem.rs
++++ b/rust/kernel/io/mem.rs
+@@ -32,6 +32,11 @@ pub(crate) unsafe fn new(device: &'a Device<Bound>, resource: &'a Resource) -> S
+         IoRequest { device, resource }
+     }
+ 
++    /// Returns the physical start address of the resource.
++    pub fn start(&self) -> u64 {
++        self.resource.start()
++    }
++
+     /// Maps an [`IoRequest`] where the size is known at compile time.
+     ///
+     /// This uses the [`ioremap()`] C API.
+-- 
+2.51.0
+

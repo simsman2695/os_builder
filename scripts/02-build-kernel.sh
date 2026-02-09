@@ -8,6 +8,14 @@ load_config "$BOARD"
 
 log_step "Building kernel for ${BOARD_NAME} (${KERNEL_VERSION})"
 
+# ── build flags (LLVM=1 for Rust kernel builds, else GCC cross-compile) ─────
+MAKE_FLAGS=(ARCH="${ARCH}")
+if [[ "${KERNEL_LLVM:-}" == "1" ]]; then
+    MAKE_FLAGS+=(LLVM=1)
+else
+    MAKE_FLAGS+=(CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}")
+fi
+
 ensure_dir "$KERNEL_OUT"
 
 cd "$KERNEL_SRC"
@@ -26,27 +34,47 @@ if [[ -d "$PATCH_DIR" ]]; then
     done
 fi
 
+# ── apply Tyr patches (Rust GPU driver + DRM infra) ─────────────────────────
+if [[ "${USE_TYR:-false}" == "true" ]]; then
+    TYR_PATCH_DIR="${BUILDER_DIR}/patches/kernel-tyr"
+    if [[ -d "$TYR_PATCH_DIR" ]]; then
+        tyr_applied=0
+        tyr_skipped=0
+        log_info "Applying Tyr patches from ${TYR_PATCH_DIR} ..."
+        for patch in "$TYR_PATCH_DIR"/*.patch; do
+            [[ -f "$patch" ]] || continue
+            if git apply --check "$patch" 2>/dev/null; then
+                git apply "$patch"
+                tyr_applied=$((tyr_applied + 1))
+            else
+                tyr_skipped=$((tyr_skipped + 1))
+            fi
+        done
+        log_info "Tyr patches: ${tyr_applied} applied, ${tyr_skipped} skipped (already applied or N/A)"
+        [[ $tyr_applied -gt 0 ]] || die "No Tyr patches could be applied — kernel source may be incompatible"
+    else
+        die "Tyr patch directory not found: ${TYR_PATCH_DIR}"
+    fi
+fi
+
 # ── defconfig ────────────────────────────────────────────────────────────────
 log_info "Configuring: ${KERNEL_DEFCONFIG}"
-make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-    "${KERNEL_DEFCONFIG}"
+make "${MAKE_FLAGS[@]}" "${KERNEL_DEFCONFIG}"
 
 # ── merge config fragments (if any) ─────────────────────────────────────────
 if [[ -v KERNEL_CONFIG_FRAGMENTS && ${#KERNEL_CONFIG_FRAGMENTS[@]} -gt 0 ]]; then
     log_info "Merging config fragments: ${KERNEL_CONFIG_FRAGMENTS[*]}"
-    ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-        scripts/kconfig/merge_config.sh -m .config "${KERNEL_CONFIG_FRAGMENTS[@]}"
-    make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" olddefconfig
+    env "${MAKE_FLAGS[@]}" scripts/kconfig/merge_config.sh -m .config "${KERNEL_CONFIG_FRAGMENTS[@]}"
+    make "${MAKE_FLAGS[@]}" olddefconfig
 fi
 
-# ── merge extra config (e.g., Panthor for mainline) ─────────────────────────
+# ── merge extra config (e.g., Panthor/Tyr for mainline) ──────────────────────
 if [[ -n "${KERNEL_EXTRA_CONFIG:-}" ]]; then
     extra_config_path="${BUILDER_DIR}/${KERNEL_EXTRA_CONFIG}"
     if [[ -f "$extra_config_path" ]]; then
         log_info "Merging extra config: ${KERNEL_EXTRA_CONFIG}"
-        ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-            scripts/kconfig/merge_config.sh -m .config "$extra_config_path"
-        make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" olddefconfig
+        env "${MAKE_FLAGS[@]}" scripts/kconfig/merge_config.sh -m .config "$extra_config_path"
+        make "${MAKE_FLAGS[@]}" olddefconfig
     else
         log_warn "Extra config not found: ${extra_config_path}"
     fi
@@ -54,24 +82,20 @@ fi
 
 # ── build Image ──────────────────────────────────────────────────────────────
 log_info "Building Image (${MAKE_JOBS} jobs) ..."
-make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-    -j"${MAKE_JOBS}" Image
+make "${MAKE_FLAGS[@]}" -j"${MAKE_JOBS}" Image
 
 # ── build DTBs ───────────────────────────────────────────────────────────────
 log_info "Building DTBs ..."
-make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-    -j"${MAKE_JOBS}" dtbs
+make "${MAKE_FLAGS[@]}" -j"${MAKE_JOBS}" dtbs
 
 # ── build modules ────────────────────────────────────────────────────────────
 log_info "Building modules ..."
-make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-    -j"${MAKE_JOBS}" modules
+make "${MAKE_FLAGS[@]}" -j"${MAKE_JOBS}" modules
 
 # ── install modules to output ────────────────────────────────────────────────
 MODULES_STAGING="${KERNEL_OUT}/modules"
 rm -rf "$MODULES_STAGING"
-make ARCH="${ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" CC="${CC}" \
-    INSTALL_MOD_PATH="$MODULES_STAGING" modules_install
+make "${MAKE_FLAGS[@]}" INSTALL_MOD_PATH="$MODULES_STAGING" modules_install
 
 # ── copy artefacts ───────────────────────────────────────────────────────────
 log_info "Copying kernel artefacts to ${KERNEL_OUT}"

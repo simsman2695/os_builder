@@ -1,0 +1,119 @@
+From 0f80dd885aaae95f149f52732435a84e2de10cee Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Wed, 27 Aug 2025 13:38:38 +0000
+Subject: [PATCH 027/161] panthor: use drm_gem_object.gpuva.lock instead of
+ gpuva_list_lock
+
+Now that drm_gem_object has a dedicated mutex for the gpuva list that is
+intended to be used in cases that must be fence signalling safe, use it
+in Panthor.
+
+Reviewed-by: Boris Brezillon <boris.brezillon@collabora.com>
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/panthor/panthor_gem.c |  4 +---
+ drivers/gpu/drm/panthor/panthor_gem.h | 12 ------------
+ drivers/gpu/drm/panthor/panthor_mmu.c | 16 ++++++++--------
+ 3 files changed, 9 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/panthor/panthor_gem.c b/drivers/gpu/drm/panthor/panthor_gem.c
+index a123bc740b..c654a33779 100644
+--- a/drivers/gpu/drm/panthor/panthor_gem.c
++++ b/drivers/gpu/drm/panthor/panthor_gem.c
+@@ -74,7 +74,6 @@ static void panthor_gem_free_object(struct drm_gem_object *obj)
+ 	mutex_destroy(&bo->label.lock);
+ 
+ 	drm_gem_free_mmap_offset(&bo->base.base);
+-	mutex_destroy(&bo->gpuva_list_lock);
+ 	drm_gem_shmem_free(&bo->base);
+ 	drm_gem_object_put(vm_root_gem);
+ }
+@@ -246,8 +245,7 @@ struct drm_gem_object *panthor_gem_create_object(struct drm_device *ddev, size_t
+ 
+ 	obj->base.base.funcs = &panthor_gem_funcs;
+ 	obj->base.map_wc = !ptdev->coherent;
+-	mutex_init(&obj->gpuva_list_lock);
+-	drm_gem_gpuva_set_lock(&obj->base.base, &obj->gpuva_list_lock);
++	drm_gem_gpuva_set_lock(&obj->base.base, &obj->base.base.gpuva.lock);
+ 	mutex_init(&obj->label.lock);
+ 
+ 	panthor_gem_debugfs_bo_init(obj);
+diff --git a/drivers/gpu/drm/panthor/panthor_gem.h b/drivers/gpu/drm/panthor/panthor_gem.h
+index 8fc7215e9b..80c6e24112 100644
+--- a/drivers/gpu/drm/panthor/panthor_gem.h
++++ b/drivers/gpu/drm/panthor/panthor_gem.h
+@@ -79,18 +79,6 @@ struct panthor_gem_object {
+ 	 */
+ 	struct drm_gem_object *exclusive_vm_root_gem;
+ 
+-	/**
+-	 * @gpuva_list_lock: Custom GPUVA lock.
+-	 *
+-	 * Used to protect insertion of drm_gpuva elements to the
+-	 * drm_gem_object.gpuva.list list.
+-	 *
+-	 * We can't use the GEM resv for that, because drm_gpuva_link() is
+-	 * called in a dma-signaling path, where we're not allowed to take
+-	 * resv locks.
+-	 */
+-	struct mutex gpuva_list_lock;
+-
+ 	/** @flags: Combination of drm_panthor_bo_flags flags. */
+ 	u32 flags;
+ 
+diff --git a/drivers/gpu/drm/panthor/panthor_mmu.c b/drivers/gpu/drm/panthor/panthor_mmu.c
+index 4140f697ba..49ca416c7c 100644
+--- a/drivers/gpu/drm/panthor/panthor_mmu.c
++++ b/drivers/gpu/drm/panthor/panthor_mmu.c
+@@ -1074,9 +1074,9 @@ static void panthor_vm_bo_put(struct drm_gpuvm_bo *vm_bo)
+ 	 * GEM vm_bo list.
+ 	 */
+ 	dma_resv_lock(drm_gpuvm_resv(vm), NULL);
+-	mutex_lock(&bo->gpuva_list_lock);
++	mutex_lock(&bo->base.base.gpuva.lock);
+ 	unpin = drm_gpuvm_bo_put(vm_bo);
+-	mutex_unlock(&bo->gpuva_list_lock);
++	mutex_unlock(&bo->base.base.gpuva.lock);
+ 	dma_resv_unlock(drm_gpuvm_resv(vm));
+ 
+ 	/* If the vm_bo object was destroyed, release the pin reference that
+@@ -1249,9 +1249,9 @@ static int panthor_vm_prepare_map_op_ctx(struct panthor_vm_op_ctx *op_ctx,
+ 	 * calling this function.
+ 	 */
+ 	dma_resv_lock(panthor_vm_resv(vm), NULL);
+-	mutex_lock(&bo->gpuva_list_lock);
++	mutex_lock(&bo->base.base.gpuva.lock);
+ 	op_ctx->map.vm_bo = drm_gpuvm_bo_obtain_prealloc(preallocated_vm_bo);
+-	mutex_unlock(&bo->gpuva_list_lock);
++	mutex_unlock(&bo->base.base.gpuva.lock);
+ 	dma_resv_unlock(panthor_vm_resv(vm));
+ 
+ 	/* If the a vm_bo for this <VM,BO> combination exists, it already
+@@ -2003,10 +2003,10 @@ static void panthor_vma_link(struct panthor_vm *vm,
+ {
+ 	struct panthor_gem_object *bo = to_panthor_bo(vma->base.gem.obj);
+ 
+-	mutex_lock(&bo->gpuva_list_lock);
++	mutex_lock(&bo->base.base.gpuva.lock);
+ 	drm_gpuva_link(&vma->base, vm_bo);
+ 	drm_WARN_ON(&vm->ptdev->base, drm_gpuvm_bo_put(vm_bo));
+-	mutex_unlock(&bo->gpuva_list_lock);
++	mutex_unlock(&bo->base.base.gpuva.lock);
+ }
+ 
+ static void panthor_vma_unlink(struct panthor_vm *vm,
+@@ -2015,9 +2015,9 @@ static void panthor_vma_unlink(struct panthor_vm *vm,
+ 	struct panthor_gem_object *bo = to_panthor_bo(vma->base.gem.obj);
+ 	struct drm_gpuvm_bo *vm_bo = drm_gpuvm_bo_get(vma->base.vm_bo);
+ 
+-	mutex_lock(&bo->gpuva_list_lock);
++	mutex_lock(&bo->base.base.gpuva.lock);
+ 	drm_gpuva_unlink(&vma->base);
+-	mutex_unlock(&bo->gpuva_list_lock);
++	mutex_unlock(&bo->base.base.gpuva.lock);
+ 
+ 	/* drm_gpuva_unlink() release the vm_bo, but we manually retained it
+ 	 * when entering this function, so we can implement deferred VMA
+-- 
+2.51.0
+

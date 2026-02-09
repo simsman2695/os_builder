@@ -1,0 +1,50 @@
+From a659ed45f24b09d0493d3d865297e6bbe0c20542 Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:32 +0200
+Subject: [PATCH 019/161] rust: block: replace `core::mem::zeroed` with
+ `pin_init::zeroed`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/block/mq/gen_disk.rs | 3 +--
+ rust/kernel/block/mq/tag_set.rs  | 4 +---
+ 2 files changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/rust/kernel/block/mq/gen_disk.rs b/rust/kernel/block/mq/gen_disk.rs
+index cd54cd64ea..75b90fe20c 100644
+--- a/rust/kernel/block/mq/gen_disk.rs
++++ b/rust/kernel/block/mq/gen_disk.rs
+@@ -93,8 +93,7 @@ pub fn build<T: Operations>(
+         name: fmt::Arguments<'_>,
+         tagset: Arc<TagSet<T>>,
+     ) -> Result<GenDisk<T>> {
+-        // SAFETY: `bindings::queue_limits` contain only fields that are valid when zeroed.
+-        let mut lim: bindings::queue_limits = unsafe { core::mem::zeroed() };
++        let mut lim: bindings::queue_limits = pin_init::zeroed();
+ 
+         lim.logical_block_size = self.logical_block_size;
+         lim.physical_block_size = self.physical_block_size;
+diff --git a/rust/kernel/block/mq/tag_set.rs b/rust/kernel/block/mq/tag_set.rs
+index c3cf56d52b..dae9df408a 100644
+--- a/rust/kernel/block/mq/tag_set.rs
++++ b/rust/kernel/block/mq/tag_set.rs
+@@ -38,9 +38,7 @@ pub fn new(
+         num_tags: u32,
+         num_maps: u32,
+     ) -> impl PinInit<Self, error::Error> {
+-        // SAFETY: `blk_mq_tag_set` only contains integers and pointers, which
+-        // all are allowed to be 0.
+-        let tag_set: bindings::blk_mq_tag_set = unsafe { core::mem::zeroed() };
++        let tag_set: bindings::blk_mq_tag_set = pin_init::zeroed();
+         let tag_set: Result<_> = core::mem::size_of::<RequestDataWrapper>()
+             .try_into()
+             .map(|cmd_size| {
+-- 
+2.51.0
+

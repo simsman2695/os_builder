@@ -1,0 +1,63 @@
+From 6b12429caa19ac885e557c8ff68994d82151113c Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 29 Oct 2025 13:43:59 -0300
+Subject: [PATCH 147/161] tyr: unbind groups when destroyed
+
+The group is destroyed, it doesn't make any sense to keep holding a CSG
+slot.
+---
+ drivers/gpu/drm/tyr/file.rs        |  4 ++--
+ drivers/gpu/drm/tyr/sched/group.rs | 13 ++++++++++++-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 0382f08663..45ebd1ad1e 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -478,13 +478,13 @@ pub(crate) fn group_create(
+     }
+ 
+     pub(crate) fn group_destroy(
+-        _tdev: &TyrDevice,
++        tdev: &TyrDevice,
+         groupdestroy: &mut uapi::drm_panthor_group_destroy,
+         file: &DrmFile,
+     ) -> Result<u32> {
+         file.inner()
+             .group_pool()
+-            .destroy_group(groupdestroy.group_handle as usize)?;
++            .destroy_group(tdev, groupdestroy.group_handle as usize)?;
+ 
+         Ok(0)
+     }
+diff --git a/drivers/gpu/drm/tyr/sched/group.rs b/drivers/gpu/drm/tyr/sched/group.rs
+index aaa0a6572c..88df6a2a34 100644
+--- a/drivers/gpu/drm/tyr/sched/group.rs
++++ b/drivers/gpu/drm/tyr/sched/group.rs
+@@ -424,11 +424,22 @@ pub(crate) fn group(self: Pin<&Self>, index: usize) -> Option<Arc<Group>> {
+         Some(group.into())
+     }
+ 
+-    pub(crate) fn destroy_group(self: Pin<&Self>, index: usize) -> Result {
++    pub(crate) fn destroy_group(self: Pin<&Self>, tdev: &TyrDevice, index: usize) -> Result {
+         let xa = self.xa.as_ref();
+ 
+         let group = xa.lock().remove(index).ok_or(EINVAL)?;
+ 
++        let csg_id = group.with_locked_inner(|inner| Ok(inner.csg_id))?;
++
++        if let Some(csg_id) = csg_id {
++            tdev.with_locked_scheduler(|sched| {
++                pr_info!("Unbinding group from CSG slot {}\n", csg_id);
++                sched.set_csg_state(tdev, csg_id, csg::GroupState::Terminate)?;
++                sched.unbind_group(tdev, csg_id)?;
++                Ok(())
++            })?;
++        }
++
+         group.with_locked_inner(|inner| {
+             inner.destroyed = true;
+             Ok(())
+-- 
+2.51.0
+

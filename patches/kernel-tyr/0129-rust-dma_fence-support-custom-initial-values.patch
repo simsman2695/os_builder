@@ -1,0 +1,37 @@
+From ba2ebe9b0e996b4c53a432147c8c5ddd8705b1e7 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 10:45:27 -0300
+Subject: [PATCH 129/161] rust: dma_fence: support custom initial values
+
+We need to start our fence contexts at 1 in Tyr. That's because we are
+using a GPU-native syncobj to back it, and that starts at zero.
+
+If our seqnos also starts at zero, we have no way to tell whether we
+should signal.
+---
+ rust/kernel/dma_fence.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/dma_fence.rs b/rust/kernel/dma_fence.rs
+index e0f130e34b..538d170860 100644
+--- a/rust/kernel/dma_fence.rs
++++ b/rust/kernel/dma_fence.rs
+@@ -392,13 +392,14 @@ pub fn new(
+         count: u32,
+         name: &'static CStr,
+         key: Option<Pin<KBox<LockClassKey>>>,
++        initial_seqno: u64,
+     ) -> Result<FenceContexts> {
+         let mut seqnos: KVec<AtomicU64> = KVec::new();
+ 
+         seqnos.reserve(count as usize, GFP_KERNEL)?;
+ 
+         for _ in 0..count {
+-            seqnos.push(Default::default(), GFP_KERNEL)?;
++            seqnos.push(AtomicU64::new(initial_seqno), GFP_KERNEL)?;
+         }
+ 
+         // SAFETY: This is always safe to call
+-- 
+2.51.0
+

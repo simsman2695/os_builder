@@ -1,0 +1,45 @@
+From db85a23f018dd13e978b74c6cf7bc7cddaf59a63 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 18 Apr 2025 19:07:06 -0400
+Subject: [PATCH 031/161] rust: types: Add ARef::as_inner_mut()
+
+With DRM's GEM API, we need to be able to mutate the inner-contents of an
+ARef<T> in situations where we can guarantee that there are currently no
+other ARefs taken out for T. The main usecase for this at the moment is
+with shmem gem objects, where there are specific fields within
+kernel::drm::gem::shmem::Object<T> outside of the embedded C structure that
+need to be mutated before we expose the ability to acquire ARefs for the
+object.
+
+So, introduce the unsafe as_inner_mut() function to allow for this.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+---
+ rust/kernel/types.rs | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/rust/kernel/types.rs b/rust/kernel/types.rs
+index dc0a02f5c3..c8738f2565 100644
+--- a/rust/kernel/types.rs
++++ b/rust/kernel/types.rs
+@@ -408,6 +408,17 @@ pub const fn cast_into(this: *const Self) -> *mut T {
+     pub const fn cast_from(this: *const T) -> *const Self {
+         this.cast()
+     }
++
++    /// Acquire a mutable reference to `T`.
++    ///
++    /// # Safety
++    ///
++    /// Callers must ensure that they have exclusive access to `T`. This also implies that no other
++    /// `ARef`s may be taken out for `T`.
++    pub(crate) unsafe fn as_inner_mut(&mut self) -> &mut T {
++        // SAFETY: Our safety contract guarantees we have exclusive access to `T`
++        unsafe { self.ptr.as_mut() }
++    }
+ }
+ 
+ impl<T> Wrapper<T> for Opaque<T> {
+-- 
+2.51.0
+

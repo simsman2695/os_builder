@@ -1,0 +1,87 @@
+From 3c775bc5ccd2baa3aec0502ec243899d62775ffd Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Wed, 20 Aug 2025 16:53:38 +0200
+Subject: [PATCH 071/161] rust: alloc: vmalloc: implement Vmalloc::to_page()
+
+Implement an abstraction of vmalloc_to_page() for subsequent use in the
+AsPageIter implementation of VBox and VVec.
+
+Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+Tested-by: Alexandre Courbot <acourbot@nvidia.com>
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Reviewed-by: Daniel Almeida <daniel.almeida@collabora.com>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/alloc/allocator.rs | 49 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/rust/kernel/alloc/allocator.rs b/rust/kernel/alloc/allocator.rs
+index 2692cf90c9..d2ffbe0874 100644
+--- a/rust/kernel/alloc/allocator.rs
++++ b/rust/kernel/alloc/allocator.rs
+@@ -15,6 +15,7 @@
+ 
+ use crate::alloc::{AllocError, Allocator};
+ use crate::bindings;
++use crate::page;
+ use crate::pr_warn;
+ 
+ /// The contiguous kernel allocator.
+@@ -142,6 +143,54 @@ unsafe fn realloc(
+     }
+ }
+ 
++impl Vmalloc {
++    /// Convert a pointer to a [`Vmalloc`] allocation to a [`page::BorrowedPage`].
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// # use core::ptr::{NonNull, from_mut};
++    /// # use kernel::{page, prelude::*};
++    /// use kernel::alloc::allocator::Vmalloc;
++    ///
++    /// let mut vbox = VBox::<[u8; page::PAGE_SIZE]>::new_uninit(GFP_KERNEL)?;
++    ///
++    /// {
++    ///     // SAFETY: By the type invariant of `Box` the inner pointer of `vbox` is non-null.
++    ///     let ptr = unsafe { NonNull::new_unchecked(from_mut(&mut *vbox)) };
++    ///
++    ///     // SAFETY:
++    ///     // `ptr` is a valid pointer to a `Vmalloc` allocation.
++    ///     // `ptr` is valid for the entire lifetime of `page`.
++    ///     let page = unsafe { Vmalloc::to_page(ptr.cast()) };
++    ///
++    ///     // SAFETY: There is no concurrent read or write to the same page.
++    ///     unsafe { page.fill_zero_raw(0, page::PAGE_SIZE)? };
++    /// }
++    /// # Ok::<(), Error>(())
++    /// ```
++    ///
++    /// # Safety
++    ///
++    /// - `ptr` must be a valid pointer to a [`Vmalloc`] allocation.
++    /// - `ptr` must remain valid for the entire duration of `'a`.
++    pub unsafe fn to_page<'a>(ptr: NonNull<u8>) -> page::BorrowedPage<'a> {
++        // SAFETY: `ptr` is a valid pointer to `Vmalloc` memory.
++        let page = unsafe { bindings::vmalloc_to_page(ptr.as_ptr().cast()) };
++
++        // SAFETY: `vmalloc_to_page` returns a valid pointer to a `struct page` for a valid pointer
++        // to `Vmalloc` memory.
++        let page = unsafe { NonNull::new_unchecked(page) };
++
++        // SAFETY:
++        // - `page` is a valid pointer to a `struct page`, given that by the safety requirements of
++        //   this function `ptr` is a valid pointer to a `Vmalloc` allocation.
++        // - By the safety requirements of this function `ptr` is valid for the entire lifetime of
++        //   `'a`.
++        unsafe { page::BorrowedPage::from_raw(page) }
++    }
++}
++
+ // SAFETY: `realloc` delegates to `ReallocFunc::call`, which guarantees that
+ // - memory remains valid until it is explicitly freed,
+ // - passing a pointer to a valid memory allocation is OK,
+-- 
+2.51.0
+

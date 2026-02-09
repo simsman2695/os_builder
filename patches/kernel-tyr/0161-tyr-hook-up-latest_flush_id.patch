@@ -1,0 +1,44 @@
+From 99201301e72b3a9a62d06c0c3cca991694b8d611 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Wed, 19 Nov 2025 10:01:02 -0300
+Subject: [PATCH 161/161] tyr: hook up latest_flush_id
+
+This seems to be working, so do it. It will add some extra performance by
+skipping cache flushes if they are not needed.
+---
+ drivers/gpu/drm/tyr/sched/job.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/job.rs b/drivers/gpu/drm/tyr/sched/job.rs
+index 05c058f619..5c22200082 100644
+--- a/drivers/gpu/drm/tyr/sched/job.rs
++++ b/drivers/gpu/drm/tyr/sched/job.rs
+@@ -27,6 +27,8 @@ pub(crate) struct Job {
+     /// Size of the userspace command stream.
+     stream_size: u32,
+ 
++    latest_flush: u32,
++
+     /// The position of the job in the ringbuffer, if any.
+     ringbuf_pos: Option<RingBufferPosition>,
+ 
+@@ -67,6 +69,7 @@ pub(crate) fn create(
+             queue_idx: qsubmit.queue_index as usize,
+             stream_addr: qsubmit.stream_addr,
+             stream_size: qsubmit.stream_size,
++            latest_flush: qsubmit.latest_flush,
+             ringbuf_pos: None,
+             done_fence,
+             sync_addr,
+@@ -91,7 +94,7 @@ fn run(job: &mut kernel::drm::sched::Job<Self>) -> Result<Option<kernel::dma_fen
+ 
+         let opcode = 2; // MOV32
+         let latest_flush_regnum = val_reg;
+-        let latest_flush = 0;
++        let latest_flush: u64 = job.latest_flush.into();
+         let mov_latest_flush: u64 = opcode << 56 | latest_flush_regnum << 48 | latest_flush;
+ 
+         let opcode = 36; //FLUSH_CACHE2
+-- 
+2.51.0
+

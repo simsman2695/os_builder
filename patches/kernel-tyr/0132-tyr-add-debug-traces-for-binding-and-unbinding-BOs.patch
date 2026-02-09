@@ -1,0 +1,66 @@
+From 20da28dd6dbe97f98e70b03514829e583d6d0678 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 11:20:55 -0300
+Subject: [PATCH 132/161] tyr: add debug traces for binding and unbinding BOs
+
+This is actually something informative to have while we develop the
+driver.
+---
+ drivers/gpu/drm/tyr/file.rs | 15 +++++++++++++++
+ drivers/gpu/drm/tyr/gem.rs  |  7 +++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/drivers/gpu/drm/tyr/file.rs b/drivers/gpu/drm/tyr/file.rs
+index 6ab465e336..3c827de506 100644
+--- a/drivers/gpu/drm/tyr/file.rs
++++ b/drivers/gpu/drm/tyr/file.rs
+@@ -165,6 +165,15 @@ pub(crate) fn vm_bind(
+                             .get_vm(vmbind.vm_id as usize)
+                             .ok_or(EINVAL)?;
+ 
++                        pr_info!("binding BO handle {} at offset {:#x} to VA range {:#x}-{:#x} in VM id {} AS {}\n",
++                            op.0.bo_handle,
++                            op.0.bo_offset,
++                            range.start,
++                            range.end,
++                            vmbind.vm_id,
++                            vm.lock().address_space().map_or(-1, |as_nr| as_nr as i32)
++                        );
++
+                         vm.lock().bind_gem(
+                             iomem.clone(),
+                             &bo.gem,
+@@ -187,6 +196,12 @@ pub(crate) fn vm_bind(
+                             .get_vm(vmbind.vm_id as usize)
+                             .ok_or(EINVAL)?;
+ 
++                        pr_info!(
++                            "unbinding VA range {:#x}-{:#x} in VM {}\n",
++                            range.start,
++                            range.end,
++                            vmbind.vm_id
++                        );
+                         vm.lock().unmap_range(iomem.clone(), range)?;
+                     }
+                     _ => return Err(ENOTSUPP),
+diff --git a/drivers/gpu/drm/tyr/gem.rs b/drivers/gpu/drm/tyr/gem.rs
+index 2eb3ed9c2d..82897841cd 100644
+--- a/drivers/gpu/drm/tyr/gem.rs
++++ b/drivers/gpu/drm/tyr/gem.rs
+@@ -167,6 +167,13 @@ pub(crate) fn new_kernel_object(
+         },
+     )?;
+ 
++    pr_info!(
++        "Binding kernel GEM object at VA range {:#x}-{:#x} (size: {:#x}) for VM {}\n",
++        range.start,
++        range.end,
++        sz,
++        vm.address_space().map_or(-1, |as_nr| as_nr as i32)
++    );
+     vm.bind_gem(iomem, &gem, 0, range, flags)?;
+ 
+     Ok(ObjectRef::new(gem))
+-- 
+2.51.0
+

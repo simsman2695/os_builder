@@ -1,0 +1,98 @@
+From 1b5be95d4c8eeada652006ce71d6b9e619b97a08 Mon Sep 17 00:00:00 2001
+From: Boqun Feng <boqun.feng@gmail.com>
+Date: Mon, 21 Apr 2025 09:42:17 -0700
+Subject: [PATCH 064/161] rust: sync: atomic: Add Atomic<{usize,isize}>
+
+Add generic atomic support for `usize` and `isize`. Note that instead of
+mapping directly to `atomic_long_t`, the represention type
+(`AllowAtomic::Repr`) is selected based on CONFIG_64BIT. This reduces
+the necessarity of creating `atomic_long_*` helpers, which could save
+the binary size of kernel if inline helpers are not available.
+
+Signed-off-by: Boqun Feng <boqun.feng@gmail.com>
+---
+ rust/kernel/sync/atomic.rs | 71 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/rust/kernel/sync/atomic.rs b/rust/kernel/sync/atomic.rs
+index d197b476e3..6008d65594 100644
+--- a/rust/kernel/sync/atomic.rs
++++ b/rust/kernel/sync/atomic.rs
+@@ -102,3 +102,74 @@ fn delta_into_repr(d: Self::Delta) -> Self::Repr {
+         d as _
+     }
+ }
++
++// SAFETY: `usize` has the same size and the alignment as `i64` for 64bit and the same as `i32` for
++// 32bit.
++unsafe impl generic::AllowAtomic for usize {
++    #[cfg(CONFIG_64BIT)]
++    type Repr = i64;
++    #[cfg(not(CONFIG_64BIT))]
++    type Repr = i32;
++
++    fn into_repr(self) -> Self::Repr {
++        self as _
++    }
++
++    fn from_repr(repr: Self::Repr) -> Self {
++        repr as _
++    }
++}
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Full, Relaxed};
++///
++/// let x = Atomic::new(42usize);
++///
++/// assert_eq!(42, x.fetch_add(12, Full));
++/// assert_eq!(54, x.load(Relaxed));
++///
++/// x.add(13, Relaxed);
++///
++/// assert_eq!(67, x.load(Relaxed));
++/// ```
++impl generic::AllowAtomicArithmetic for usize {
++    type Delta = usize;
++
++    fn delta_into_repr(d: Self::Delta) -> Self::Repr {
++        d as _
++    }
++}
++
++// SAFETY: `isize` has the same size and the alignment as `i64` for 64bit and the same as `i32` for
++// 32bit.
++unsafe impl generic::AllowAtomic for isize {
++    type Repr = i64;
++
++    fn into_repr(self) -> Self::Repr {
++        self as _
++    }
++
++    fn from_repr(repr: Self::Repr) -> Self {
++        repr as _
++    }
++}
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Full, Relaxed};
++///
++/// let x = Atomic::new(42isize);
++///
++/// assert_eq!(42, x.fetch_add(12, Full));
++/// assert_eq!(54, x.load(Relaxed));
++///
++/// x.add(13, Relaxed);
++///
++/// assert_eq!(67, x.load(Relaxed));
++/// ```
++impl generic::AllowAtomicArithmetic for isize {
++    type Delta = isize;
++
++    fn delta_into_repr(d: Self::Delta) -> Self::Repr {
++        d as _
++    }
++}
+-- 
+2.51.0
+

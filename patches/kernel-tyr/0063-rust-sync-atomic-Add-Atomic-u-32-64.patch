@@ -1,0 +1,104 @@
+From d6ef6e4288d84d95037232633876279d172b6c71 Mon Sep 17 00:00:00 2001
+From: Boqun Feng <boqun.feng@gmail.com>
+Date: Mon, 21 Apr 2025 09:42:16 -0700
+Subject: [PATCH 063/161] rust: sync: atomic: Add Atomic<u{32,64}>
+
+Add generic atomic support for basic unsigned types that have an
+`AtomicImpl` with the same size and alignment.
+
+Signed-off-by: Boqun Feng <boqun.feng@gmail.com>
+---
+ rust/kernel/sync/atomic.rs | 80 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 80 insertions(+)
+
+diff --git a/rust/kernel/sync/atomic.rs b/rust/kernel/sync/atomic.rs
+index a01e44eec3..d197b476e3 100644
+--- a/rust/kernel/sync/atomic.rs
++++ b/rust/kernel/sync/atomic.rs
+@@ -22,3 +22,83 @@
+ 
+ pub use generic::Atomic;
+ pub use ordering::{Acquire, Full, Relaxed, Release};
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Relaxed};
++///
++/// let x = Atomic::new(42u64);
++///
++/// assert_eq!(42, x.load(Relaxed));
++/// ```
++// SAFETY: `u64` and `i64` has the same size and alignment.
++unsafe impl generic::AllowAtomic for u64 {
++    type Repr = i64;
++
++    fn into_repr(self) -> Self::Repr {
++        self as _
++    }
++
++    fn from_repr(repr: Self::Repr) -> Self {
++        repr as _
++    }
++}
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Full, Relaxed};
++///
++/// let x = Atomic::new(42u64);
++///
++/// assert_eq!(42, x.fetch_add(12, Full));
++/// assert_eq!(54, x.load(Relaxed));
++///
++/// x.add(13, Relaxed);
++///
++/// assert_eq!(67, x.load(Relaxed));
++/// ```
++impl generic::AllowAtomicArithmetic for u64 {
++    type Delta = u64;
++
++    fn delta_into_repr(d: Self::Delta) -> Self::Repr {
++        d as _
++    }
++}
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Relaxed};
++///
++/// let x = Atomic::new(42u32);
++///
++/// assert_eq!(42, x.load(Relaxed));
++/// ```
++// SAFETY: `u32` and `i32` has the same size and alignment.
++unsafe impl generic::AllowAtomic for u32 {
++    type Repr = i32;
++
++    fn into_repr(self) -> Self::Repr {
++        self as _
++    }
++
++    fn from_repr(repr: Self::Repr) -> Self {
++        repr as _
++    }
++}
++
++/// ```rust
++/// use kernel::sync::atomic::{Atomic, Full, Relaxed};
++///
++/// let x = Atomic::new(42u32);
++///
++/// assert_eq!(42, x.fetch_add(12, Full));
++/// assert_eq!(54, x.load(Relaxed));
++///
++/// x.add(13, Relaxed);
++///
++/// assert_eq!(67, x.load(Relaxed));
++/// ```
++impl generic::AllowAtomicArithmetic for u32 {
++    type Delta = u32;
++
++    fn delta_into_repr(d: Self::Delta) -> Self::Repr {
++        d as _
++    }
++}
+-- 
+2.51.0
+

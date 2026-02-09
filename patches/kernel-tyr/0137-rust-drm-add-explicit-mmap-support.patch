@@ -1,0 +1,104 @@
+From 5e1c4cc9ae9b888a8bf5b2f9ce9670acc1c581b6 Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Fri, 24 Oct 2025 15:17:33 -0300
+Subject: [PATCH 137/161] rust: drm: add explicit mmap support
+
+---
+ rust/kernel/drm/device.rs | 46 +++++++++++++++++++++++++++++++++++++--
+ rust/kernel/drm/driver.rs | 16 ++++++++++++++
+ 2 files changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index 06d73a557d..f7598fa81a 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -63,6 +63,50 @@ pub struct Device<T: drm::Driver> {
+ type DriverAllocImpl<T> = <<T as drm::Driver>::Object as drm::gem::DriverObject>::Object;
+ 
+ impl<T: drm::Driver> Device<T> {
++    /// Custom mmap handler that calls into Driver::mmap if provided
++    ///
++    /// # Safety:
++    ///
++    /// - Caller must ensure that `filp` and `vma` are valid pointers.
++    /// - `filp->private_data` must point to a valid `drm_file`.
++    unsafe extern "C" fn mmap_callback(
++        filp: *mut bindings::file,
++        vma: *mut bindings::vm_area_struct,
++    ) -> core::ffi::c_int {
++        // SAFETY: Caller ensures filp is valid, and private_data contains drm_file
++        let raw_file = unsafe { (*filp).private_data as *mut bindings::drm_file };
++        if raw_file.is_null() {
++            return bindings::EINVAL as _;
++        }
++
++        // SAFETY: We just checked that raw_file is not null
++        let drm_file = unsafe { drm::file::File::<T::File>::from_raw(raw_file) };
++
++        // SAFETY: raw_file is valid, minor is always set
++        let raw_device = unsafe { (*(*raw_file).minor).dev };
++
++        // SAFETY: Device is valid for the lifetime of the file
++        let device = unsafe { Device::<T>::from_raw(raw_device) };
++
++        // SAFETY: VMA is undergoing initialization in mmap hook
++        let vma_new = unsafe { crate::mm::virt::VmaNew::from_raw(vma) };
++
++        match T::mmap(device, drm_file, vma_new) {
++            Some(Ok(())) => 0,
++            Some(Err(e)) => e.to_errno(),
++            None => {
++                // SAFETY: Called from mmap context with valid parameters
++                unsafe { bindings::drm_gem_mmap(filp, vma) }
++            }
++        }
++    }
++
++    const GEM_FOPS: bindings::file_operations = {
++        let mut fops = drm::gem::create_fops();
++        fops.mmap = Some(Self::mmap_callback);
++        fops
++    };
++
+     const VTABLE: bindings::drm_driver = drm_legacy_fields! {
+         load: None,
+         open: Some(drm::File::<T::File>::open_callback),
+@@ -94,8 +138,6 @@ impl<T: drm::Driver> Device<T> {
+         fops: &Self::GEM_FOPS,
+     };
+ 
+-    const GEM_FOPS: bindings::file_operations = drm::gem::create_fops();
+-
+     /// Create a new `drm::Device` for a `drm::Driver`.
+     pub fn new(dev: &device::Device, data: impl PinInit<T::Data, Error>) -> Result<ARef<Self>> {
+         // `__drm_dev_alloc` uses `kmalloc()` to allocate memory, hence ensure a `kmalloc()`
+diff --git a/rust/kernel/drm/driver.rs b/rust/kernel/drm/driver.rs
+index dec41ff3f1..99de06311b 100644
+--- a/rust/kernel/drm/driver.rs
++++ b/rust/kernel/drm/driver.rs
+@@ -117,6 +117,22 @@ pub trait Driver {
+ 
+     /// IOCTL list. See `kernel::drm::ioctl::declare_drm_ioctls!{}`.
+     const IOCTLS: &'static [drm::ioctl::DrmIoctlDescriptor];
++
++    /// Custom mmap handler.
++    ///
++    /// If provided, this handler will be called for all mmap operations on the DRM device.
++    /// The driver can handle custom mappings (like MMIO regions) by returning `Some(Ok(()))`,
++    /// or defer to the default GEM mmap behavior by returning `None`.
++    fn mmap(
++        _device: &drm::device::Device<Self>,
++        _file: &drm::file::File<Self::File>,
++        _vma: &crate::mm::virt::VmaNew,
++    ) -> Option<Result>
++    where
++        Self: Sized,
++    {
++        None
++    }
+ }
+ 
+ /// The registration type of a `drm::Device`.
+-- 
+2.51.0
+

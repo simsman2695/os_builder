@@ -1,0 +1,37 @@
+From 9845baeedcaa066e2dfe660a7bbf065d2e2edd6c Mon Sep 17 00:00:00 2001
+From: Benno Lossin <lossin@kernel.org>
+Date: Thu, 14 Aug 2025 11:30:36 +0200
+Subject: [PATCH 023/161] rust: auxiliary: replace `core::mem::zeroed` with
+ `pin_init::zeroed`
+
+All types in `bindings` implement `Zeroable` if they can, so use
+`pin_init::zeroed` instead of relying on `unsafe` code.
+
+If this ends up not compiling in the future, something in bindgen or on
+the C side changed and is most likely incorrect.
+
+Signed-off-by: Benno Lossin <lossin@kernel.org>
+---
+ rust/kernel/auxiliary.rs | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/rust/kernel/auxiliary.rs b/rust/kernel/auxiliary.rs
+index 4749fb6bff..10ec1f3b4a 100644
+--- a/rust/kernel/auxiliary.rs
++++ b/rust/kernel/auxiliary.rs
+@@ -108,11 +108,7 @@ pub const fn new(modname: &'static CStr, name: &'static CStr) -> Self {
+         let name = name.as_bytes_with_nul();
+         let modname = modname.as_bytes_with_nul();
+ 
+-        // TODO: Replace with `bindings::auxiliary_device_id::default()` once stabilized for
+-        // `const`.
+-        //
+-        // SAFETY: FFI type is valid to be zero-initialized.
+-        let mut id: bindings::auxiliary_device_id = unsafe { core::mem::zeroed() };
++        let mut id: bindings::auxiliary_device_id = pin_init::zeroed();
+ 
+         let mut i = 0;
+         while i < modname.len() {
+-- 
+2.51.0
+

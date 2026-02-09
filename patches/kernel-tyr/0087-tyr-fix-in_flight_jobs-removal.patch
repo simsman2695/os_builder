@@ -1,0 +1,54 @@
+From 21a3d402b4db9fe17fa8002bc90383bdd52705dd Mon Sep 17 00:00:00 2001
+From: Alice Ryhl <aliceryhl@google.com>
+Date: Wed, 11 Jun 2025 12:06:20 +0000
+Subject: [PATCH 087/161] tyr: fix in_flight_jobs removal
+
+Currently fence.signaled() always returns false. Thus, fix
+update_group() to remove signalled fences without relying on this check.
+
+Signed-off-by: Alice Ryhl <aliceryhl@google.com>
+---
+ drivers/gpu/drm/tyr/sched/events.rs | 22 ++++++++++++----------
+ 1 file changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/tyr/sched/events.rs b/drivers/gpu/drm/tyr/sched/events.rs
+index 8bd75485b9..d7ddc609e1 100644
+--- a/drivers/gpu/drm/tyr/sched/events.rs
++++ b/drivers/gpu/drm/tyr/sched/events.rs
+@@ -212,21 +212,23 @@ fn update_group(&mut self, group: &Group) -> Result {
+                 // be in TyrData, or anywhere else we can easily access from
+                 // here. It should also be protected by a SpinLock instead,
+                 // because we cannot sleep in the signalling path.
+-                for job_fence in &queue.in_flight_jobs {
+-                    // We have executed everything up until this point.
+-                    if sync_obj.seqno < job_fence.seqno() {
+-                        break;
++                let mut res = Ok(());
++                queue.in_flight_jobs.retain(|fence| {
++                    if res.is_err() {
++                        return true;
++                    }
++                    if sync_obj.seqno < fence.seqno() {
++                        return true;
+                     }
+ 
+                     // Add this debug aid for a while. It will be important
+                     // while we develop the driver.
+-                    pr_info!("Signalling fence: {}\n", job_fence.seqno());
+-
+-                    job_fence.signal()?;
+-                }
++                    pr_info!("Signalling fence: {}\n", fence.seqno());
+ 
+-                // Ok: this does not allocate, so it is ok to use in the signalling path.
+-                queue.in_flight_jobs.retain(|fence| !fence.signaled());
++                    res = fence.signal();
++                    false
++                });
++                res?;
+             }
+ 
+             Ok(())
+-- 
+2.51.0
+

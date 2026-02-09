@@ -1,0 +1,46 @@
+From 6da2ae35ba0521ae5f5fb00ed14af9d2ba0774df Mon Sep 17 00:00:00 2001
+From: Danilo Krummrich <dakr@kernel.org>
+Date: Wed, 20 Aug 2025 16:53:40 +0200
+Subject: [PATCH 073/161] rust: page: define trait AsPageIter
+
+The AsPageIter trait provides a common interface for types that
+provide a page iterator, such as VmallocPageIter.
+
+Subsequent patches will leverage this to let VBox and VVec provide a
+VmallocPageIter though this trait.
+
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+Tested-by: Alexandre Courbot <acourbot@nvidia.com>
+Reviewed-by: Daniel Almeida <daniel.almeida@collabora.com>
+Signed-off-by: Danilo Krummrich <dakr@kernel.org>
+---
+ rust/kernel/page.rs | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/rust/kernel/page.rs b/rust/kernel/page.rs
+index 631718a6ad..75ef096075 100644
+--- a/rust/kernel/page.rs
++++ b/rust/kernel/page.rs
+@@ -103,6 +103,18 @@ fn deref(&self) -> &Self::Target {
+     }
+ }
+ 
++/// Trait to be implemented by types which provide an [`Iterator`] implementation of
++/// [`BorrowedPage`] items, such as [`VmallocPageIter`](kernel::alloc::allocator::VmallocPageIter).
++pub trait AsPageIter {
++    /// The [`Iterator`] type, e.g. [`VmallocPageIter`](kernel::alloc::allocator::VmallocPageIter).
++    type Iter<'a>: Iterator<Item = BorrowedPage<'a>>
++    where
++        Self: 'a;
++
++    /// Returns an [`Iterator`] of [`BorrowedPage`] items over all pages owned by `self`.
++    fn page_iter(&mut self) -> Self::Iter<'_>;
++}
++
+ /// A pointer to a page that owns the page allocation.
+ ///
+ /// # Invariants
+-- 
+2.51.0
+

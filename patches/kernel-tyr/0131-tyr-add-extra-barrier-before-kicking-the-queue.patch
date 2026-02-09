@@ -1,0 +1,25 @@
+From fa1c25a297b9a1becd500f3ea8aad6cf1047841d Mon Sep 17 00:00:00 2001
+From: Daniel Almeida <daniel.almeida@collabora.com>
+Date: Mon, 27 Oct 2025 11:15:02 -0300
+Subject: [PATCH 131/161] tyr: add extra barrier before kicking the queue
+
+Just in case.
+---
+ drivers/gpu/drm/tyr/sched/queue.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/tyr/sched/queue.rs b/drivers/gpu/drm/tyr/sched/queue.rs
+index 473834e028..589a91c4ed 100644
+--- a/drivers/gpu/drm/tyr/sched/queue.rs
++++ b/drivers/gpu/drm/tyr/sched/queue.rs
+@@ -179,6 +179,7 @@ pub(crate) fn append_instrs(&mut self, instrs: &[u8]) -> Result {
+         ringbuf_input.insert += instrs.len() as u64;
+ 
+         self.interfaces.write_input(ringbuf_input)?;
++        kernel::sync::barrier::smp_wmb();
+         Ok(())
+     }
+ 
+-- 
+2.51.0
+

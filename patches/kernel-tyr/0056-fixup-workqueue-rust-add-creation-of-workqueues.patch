@@ -1,0 +1,39 @@
+From c414c24c29706838c588bbb422ce1e80579a380b Mon Sep 17 00:00:00 2001
+From: Beata Michalska <beata.michalska@arm.com>
+Date: Tue, 26 Aug 2025 17:22:53 +0200
+Subject: [PATCH 056/161] fixup!: workqueue: rust: add creation of workqueues
+
+As a consequence of commit:
+    fda6add: "workqueue: Basic memory allocation profiling support"
+switch from alloc_worqueue to alloc_workqueue_noprof
+
+Signed-off-by: Beata Michalska <beata.michalska@arm.com>
+---
+ rust/kernel/workqueue.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/rust/kernel/workqueue.rs b/rust/kernel/workqueue.rs
+index 864bf7052b..184bd2740f 100644
+--- a/rust/kernel/workqueue.rs
++++ b/rust/kernel/workqueue.rs
+@@ -418,7 +418,7 @@ pub fn new(name: &CStr, flags: WqFlags, max_active: usize) -> Result<OwnedQueue,
+         // * "%s\0" is compatible with passing the name as a c-string.
+         // * the flags argument does not include internal flags.
+         let ptr = unsafe {
+-            bindings::alloc_workqueue(
++            bindings::alloc_workqueue_noprof(
+                 b"%s\0".as_ptr(),
+                 flags.0,
+                 i32::try_from(max_active).unwrap_or(i32::MAX),
+@@ -456,7 +456,7 @@ pub fn new_fmt(
+         // * "%pA\0" is compatible with passing an `Arguments` pointer.
+         // * the flags argument does not include internal flags.
+         let ptr = unsafe {
+-            bindings::alloc_workqueue(
++            bindings::alloc_workqueue_noprof(
+                 b"%pA\0".as_ptr(),
+                 flags.0,
+                 i32::try_from(max_active).unwrap_or(i32::MAX),
+-- 
+2.51.0
+
