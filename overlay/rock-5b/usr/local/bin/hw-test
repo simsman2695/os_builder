@@ -1359,6 +1359,212 @@ test_npu_stress() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Virtualization / Container Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+test_virt_detection() {
+    log STEP "Detecting virtualization and container support..."
+
+    # KVM
+    if [[ -e /dev/kvm ]]; then
+        log PASS "KVM: /dev/kvm present"
+        record_result "virt_kvm" "PASS" "/dev/kvm available"
+    else
+        log FAIL "KVM: /dev/kvm not found"
+        record_result "virt_kvm" "FAIL" "/dev/kvm missing"
+    fi
+
+    # QEMU
+    if check_command qemu-system-aarch64; then
+        local qemu_ver
+        qemu_ver=$(qemu-system-aarch64 --version 2>/dev/null | head -1 || true)
+        log PASS "QEMU: qemu-system-aarch64 found ($qemu_ver)"
+        record_result "virt_qemu" "PASS" "$qemu_ver"
+    else
+        log FAIL "QEMU: qemu-system-aarch64 not found"
+        record_result "virt_qemu" "FAIL" "Not installed"
+    fi
+
+    # libvirt
+    if check_command virsh; then
+        log PASS "libvirt: virsh found"
+        record_result "virt_libvirt" "PASS" "virsh available"
+    else
+        log FAIL "libvirt: virsh not found"
+        record_result "virt_libvirt" "FAIL" "Not installed"
+    fi
+
+    # LXC
+    if check_command lxc-create; then
+        log PASS "LXC: lxc-create found"
+        record_result "virt_lxc" "PASS" "LXC available"
+    else
+        log FAIL "LXC: lxc-create not found"
+        record_result "virt_lxc" "FAIL" "Not installed"
+    fi
+
+    # nftables
+    if check_command nft; then
+        if nft list tables &>/dev/null; then
+            log PASS "nftables: kernel modules loaded"
+            record_result "virt_nftables" "PASS" "nft working"
+        else
+            log FAIL "nftables: nft command failed (kernel modules missing?)"
+            record_result "virt_nftables" "FAIL" "nft list tables failed"
+        fi
+    else
+        log FAIL "nftables: nft command not found"
+        record_result "virt_nftables" "FAIL" "Not installed"
+    fi
+
+    # vhost-net
+    if [[ -e /dev/vhost-net ]]; then
+        log PASS "vhost-net: /dev/vhost-net present"
+        record_result "virt_vhost" "PASS" "/dev/vhost-net available"
+    else
+        log WARN "vhost-net: /dev/vhost-net not found (VM networking won't have VHOST acceleration)"
+        record_result "virt_vhost" "WARN" "/dev/vhost-net missing"
+    fi
+}
+
+test_virt_functional() {
+    [[ "$TEST_MODE" == "quick" ]] && return
+
+    log STEP "Testing virtualization functional checks..."
+
+    # libvirt connectivity
+    if check_command virsh; then
+        if virsh list &>/dev/null; then
+            log PASS "libvirt: virsh list succeeds (libvirtd running, KVM accessible)"
+            record_result "virt_libvirt_conn" "PASS" "libvirtd running"
+        else
+            log FAIL "libvirt: virsh list failed (is libvirtd running?)"
+            record_result "virt_libvirt_conn" "FAIL" "virsh list failed"
+        fi
+    else
+        log WARN "libvirt: skipping connectivity test (virsh not installed)"
+        record_result "virt_libvirt_conn" "WARN" "virsh not installed"
+    fi
+
+    # KVM dmesg check — look for vcpu init failures
+    local kvm_errors
+    kvm_errors=$(dmesg 2>/dev/null | grep -i "kvm_arm_vcpu_init failed" || true)
+    if [[ -n "$kvm_errors" ]]; then
+        log FAIL "KVM: dmesg shows vcpu init failure: $kvm_errors"
+        record_result "virt_kvm_dmesg" "FAIL" "kvm_arm_vcpu_init failed in dmesg"
+    else
+        log PASS "KVM: no vcpu init errors in dmesg"
+        record_result "virt_kvm_dmesg" "PASS" "No KVM errors in dmesg"
+    fi
+
+    # KVM boot test — actually strap a minimal VM to prove KVM works end-to-end
+    if check_command qemu-system-aarch64 && [[ -e /dev/kvm ]]; then
+        log STEP "KVM: attempting to boot a minimal VM..."
+        local qemu_out
+        # Boot QEMU with KVM, no disk/kernel — it will fail to find a bootable
+        # image and exit, but the key test is whether KVM vCPU init succeeds.
+        # Timeout after 5s in case it hangs.
+        qemu_out=$(timeout 5 qemu-system-aarch64 \
+            -machine virt -cpu host -enable-kvm \
+            -m 128 -smp 1 -nographic -no-reboot \
+            -bios none -boot n 2>&1) || true
+
+        if echo "$qemu_out" | grep -qi "kvm_arm_vcpu_init failed\|Failed to initialize KVM\|kvm_init_vcpu failed"; then
+            log FAIL "KVM: QEMU vCPU init failed — $qemu_out"
+            record_result "virt_kvm_boot" "FAIL" "vCPU init failed"
+        else
+            log PASS "KVM: QEMU with KVM acceleration initialized successfully"
+            record_result "virt_kvm_boot" "PASS" "KVM vCPU init OK"
+        fi
+    else
+        log WARN "KVM: skipping boot test (qemu-system-aarch64 or /dev/kvm not available)"
+        record_result "virt_kvm_boot" "WARN" "QEMU or /dev/kvm missing"
+    fi
+
+    # Bridge networking
+    local bridge_found=false
+    for br in /sys/class/net/virbr*; do
+        if [[ -d "$br" ]]; then
+            local name
+            name=$(basename "$br")
+            log PASS "Bridge: $name present"
+            bridge_found=true
+            break
+        fi
+    done
+    if $bridge_found; then
+        record_result "virt_bridge" "PASS" "virbr bridge found"
+    else
+        log WARN "Bridge: no virbr* bridge found (libvirt default network may not be started)"
+        record_result "virt_bridge" "WARN" "No virbr bridge"
+    fi
+
+    # LXC container lifecycle
+    if check_command lxc-create; then
+        log STEP "LXC: testing container lifecycle (busybox)..."
+        local lxc_name="hw-test-virt"
+        local lxc_pass=true
+        local lxc_detail=""
+
+        # Cleanup any leftover from a previous run
+        lxc-stop -n "$lxc_name" 2>/dev/null || true
+        lxc-destroy -n "$lxc_name" 2>/dev/null || true
+
+        # Create
+        if lxc-create -t busybox -n "$lxc_name" -- 2>/dev/null; then
+            log INFO "LXC: container created"
+        else
+            log FAIL "LXC: failed to create busybox container"
+            record_result "virt_lxc_lifecycle" "FAIL" "lxc-create failed"
+            return
+        fi
+
+        # Disable networking — test only needs namespaces/cgroups, not lxcbr0
+        local lxc_config="/var/lib/lxc/${lxc_name}/config"
+        if [[ -f "$lxc_config" ]]; then
+            sed -i '/^lxc\.net\./d' "$lxc_config"
+            echo "lxc.net.0.type = empty" >> "$lxc_config"
+        fi
+
+        # Start
+        if lxc-start -n "$lxc_name" -d 2>/dev/null; then
+            log INFO "LXC: container started"
+            sleep 2
+        else
+            lxc_pass=false
+            lxc_detail="lxc-start failed"
+        fi
+
+        # Exec
+        if $lxc_pass; then
+            local output
+            output=$(lxc-attach -n "$lxc_name" -- /bin/echo "hello" 2>/dev/null) || true
+            if [[ "$output" == "hello" ]]; then
+                log INFO "LXC: exec inside container succeeded"
+            else
+                lxc_pass=false
+                lxc_detail="lxc-attach output mismatch: '$output'"
+            fi
+        fi
+
+        # Cleanup
+        lxc-stop -n "$lxc_name" 2>/dev/null || true
+        lxc-destroy -n "$lxc_name" 2>/dev/null || true
+
+        if $lxc_pass; then
+            log PASS "LXC: container lifecycle passed (create/start/exec/stop/destroy)"
+            record_result "virt_lxc_lifecycle" "PASS" "Full lifecycle OK"
+        else
+            log FAIL "LXC: container lifecycle failed ($lxc_detail)"
+            record_result "virt_lxc_lifecycle" "FAIL" "$lxc_detail"
+        fi
+    else
+        log WARN "LXC: skipping lifecycle test (lxc-create not installed)"
+        record_result "virt_lxc_lifecycle" "WARN" "LXC not installed"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Report Generation
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1573,6 +1779,11 @@ run_all_tests() {
     test_npu_detection
     test_npu_functional
     test_npu_stress
+
+    # Virtualization Tests
+    header "Virtualization Tests (KVM / QEMU / LXC)"
+    test_virt_detection
+    test_virt_functional
 
     # Generate reports
     [[ "$GENERATE_HTML" == "true" ]] && generate_html_report

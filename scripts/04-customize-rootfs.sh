@@ -116,6 +116,30 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOTEOF
 
+# ── chroot: install virtualization packages (QEMU, libvirt, LXC) ────────────
+log_info "Installing virtualization packages (QEMU, libvirt, LXC) ..."
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \
+    qemu-system-arm \
+    qemu-utils \
+    qemu-efi-aarch64 \
+    libvirt-daemon-system \
+    libvirt-clients \
+    virtinst \
+    lxc \
+    lxc-utils \
+    busybox-static \
+    nftables \
+    iptables \
+    dnsmasq-base \
+    bridge-utils
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+systemctl enable lxc-net.service 2>/dev/null || true
+CHROOTEOF
+
 # ── chroot: create user ─────────────────────────────────────────────────────
 log_info "Creating user cpedge ..."
 chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'

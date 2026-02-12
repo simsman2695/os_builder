@@ -64,7 +64,11 @@ make "${MAKE_FLAGS[@]}" "${KERNEL_DEFCONFIG}"
 # ── merge config fragments (if any) ─────────────────────────────────────────
 if [[ -v KERNEL_CONFIG_FRAGMENTS && ${#KERNEL_CONFIG_FRAGMENTS[@]} -gt 0 ]]; then
     log_info "Merging config fragments: ${KERNEL_CONFIG_FRAGMENTS[*]}"
-    env "${MAKE_FLAGS[@]}" scripts/kconfig/merge_config.sh -m .config "${KERNEL_CONFIG_FRAGMENTS[@]}"
+    fragment_paths=()
+    for frag in "${KERNEL_CONFIG_FRAGMENTS[@]}"; do
+        fragment_paths+=("${BUILDER_DIR}/${frag}")
+    done
+    env "${MAKE_FLAGS[@]}" scripts/kconfig/merge_config.sh -m .config "${fragment_paths[@]}"
     make "${MAKE_FLAGS[@]}" olddefconfig
 fi
 
