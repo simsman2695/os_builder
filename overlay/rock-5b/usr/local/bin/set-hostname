@@ -1,0 +1,40 @@
+#!/bin/bash
+# set-hostname — generate unique hostname from primary NIC MAC address
+# Runs once on first boot, then disables itself.
+
+set -e
+
+# Find first ethernet interface (en*)
+for iface in /sys/class/net/en*; do
+    [ -e "$iface" ] || continue
+    MAC="$(cat "$iface/address" 2>/dev/null)" && break
+done
+
+if [ -z "$MAC" ]; then
+    echo "set-hostname: no ethernet interface found, skipping" >&2
+    exit 0
+fi
+
+# Last 3 octets, stripped of colons → 6 hex chars
+SUFFIX="$(echo "$MAC" | awk -F: '{print $(NF-2) $(NF-1) $NF}')"
+NEW_HOSTNAME="cpedge-${SUFFIX}"
+
+# Read current hostname
+OLD_HOSTNAME="$(hostname)"
+
+# Set it
+hostnamectl set-hostname "$NEW_HOSTNAME"
+echo "$NEW_HOSTNAME" > /etc/hostname
+
+# Update /etc/hosts
+if grep -q "$OLD_HOSTNAME" /etc/hosts 2>/dev/null; then
+    sed -i "s/$OLD_HOSTNAME/$NEW_HOSTNAME/g" /etc/hosts
+else
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$NEW_HOSTNAME/" /etc/hosts
+    grep -q "127.0.1.1" /etc/hosts || echo "127.0.1.1	$NEW_HOSTNAME" >> /etc/hosts
+fi
+
+echo "set-hostname: hostname set to $NEW_HOSTNAME (MAC: $MAC)"
+
+# Disable ourselves — one-shot
+systemctl disable set-hostname-firstboot.service 2>/dev/null || true

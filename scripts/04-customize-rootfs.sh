@@ -84,7 +84,7 @@ apt-get install -y --no-install-recommends \
     wpasupplicant \
     cloud-guest-utils e2fsprogs \
     locales \
-    vim curl less wget
+    vim curl less wget neofetch
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOTEOF
@@ -138,6 +138,26 @@ apt-get install -y --no-install-recommends \
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 systemctl enable lxc-net.service 2>/dev/null || true
+CHROOTEOF
+
+# ── install remote.it device package ────────────────────────────────────────
+REMOTEIT_VERSION="${REMOTEIT_VERSION:-5.4.2}"
+REMOTEIT_DEB="remoteit-${REMOTEIT_VERSION}.arm64.deb"
+REMOTEIT_URL="https://downloads.remote.it/remoteit/v${REMOTEIT_VERSION}/${REMOTEIT_DEB}"
+REMOTEIT_DL="${TMP_DIR}/${REMOTEIT_DEB}"
+
+log_info "Installing remote.it device package (v${REMOTEIT_VERSION}) ..."
+if [[ ! -f "$REMOTEIT_DL" ]]; then
+    wget -q "$REMOTEIT_URL" -O "$REMOTEIT_DL"
+fi
+cp "$REMOTEIT_DL" "${ROOTFS_DIR}/tmp/${REMOTEIT_DEB}"
+chroot "$ROOTFS_DIR" /bin/bash -e <<CHROOTEOF
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y /tmp/${REMOTEIT_DEB}
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+rm -f /tmp/${REMOTEIT_DEB}
 CHROOTEOF
 
 # ── chroot: create user ─────────────────────────────────────────────────────
@@ -444,6 +464,29 @@ EOF
 
 echo "cpedgeOS ${UBUNTU_VERSION} \\n \\l" > "${ROOTFS_DIR}/etc/issue"
 
+# ── brand MOTD and remove minimized warning ────────────────────────────────
+log_info "Branding MOTD and removing minimized notice ..."
+# Remove the "This system has been minimized" login nag
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/60-unminimize"
+# Remove Ubuntu-specific MOTD scripts (ads, help links, ESM notices)
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/10-help-text"
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/50-motd-news"
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/88-esm-announce"
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/91-contract-ua-esm-status"
+# Replace the header with cpedgeOS branding
+cat > "${ROOTFS_DIR}/etc/update-motd.d/00-header" <<'MOTDEOF'
+#!/bin/sh
+. /etc/os-release
+printf "Welcome to %s (%s %s %s)\n" "$PRETTY_NAME" "$(uname -o)" "$(uname -r)" "$(uname -m)"
+printf "(c) 2026 CPEdge Inc. All rights reserved.\n"
+MOTDEOF
+chmod +x "${ROOTFS_DIR}/etc/update-motd.d/00-header"
+# Remove Ubuntu legal notice ("The programs included with the Ubuntu system...")
+rm -f "${ROOTFS_DIR}/etc/legal"
+# Remove sudo hint ("To run a command as administrator...")
+rm -f "${ROOTFS_DIR}/etc/update-motd.d/10-help-text"
+sed -i '/sudo_root/d; /run a command as administrator/d' "${ROOTFS_DIR}/etc/bash.bashrc" 2>/dev/null || true
+
 # ── fix SSH authorized_keys ownership/permissions ──────────────────────────
 if [[ -d "${ROOTFS_DIR}/home/cpedge/.ssh" ]]; then
     log_info "Setting SSH authorized_keys permissions ..."
@@ -454,6 +497,11 @@ chmod 600 /home/cpedge/.ssh/authorized_keys
 CHROOTEOF
 fi
 
+# ── fix cpedge home directory ownership (overlay files are root-owned) ─────
+if [[ -d "${ROOTFS_DIR}/home/cpedge/.config" ]]; then
+    chroot "$ROOTFS_DIR" chown -R cpedge:cpedge /home/cpedge/.config
+fi
+
 # ── enable networking services and generate networkd configs ────────────────
 log_info "Enabling systemd-networkd, systemd-resolved, timesyncd, and generating netplan config ..."
 chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
@@ -461,6 +509,18 @@ systemctl enable systemd-networkd.service 2>/dev/null || true
 systemctl enable systemd-resolved.service 2>/dev/null || true
 systemctl enable systemd-timesyncd.service 2>/dev/null || true
 netplan generate 2>/dev/null || true
+CHROOTEOF
+
+# ── enable daily SSD TRIM ─────────────────────────────────────────────────
+log_info "Enabling daily fstrim timer for SSD TRIM ..."
+ensure_dir "${ROOTFS_DIR}/etc/systemd/system/fstrim.timer.d"
+cat > "${ROOTFS_DIR}/etc/systemd/system/fstrim.timer.d/daily.conf" <<'EOF'
+[Timer]
+OnCalendar=
+OnCalendar=daily
+EOF
+chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl enable fstrim.timer 2>/dev/null || true
 CHROOTEOF
 
 # ── enable rootfs resize service ───────────────────────────────────────────
@@ -480,6 +540,16 @@ if [[ -f "${ROOTFS_DIR}/usr/local/bin/hw-test" ]]; then
     chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable hw-test-firstboot.service 2>/dev/null || true
+CHROOTEOF
+fi
+
+# ── enable hostname generation service ─────────────────────────────────────
+if [[ -f "${ROOTFS_DIR}/usr/local/bin/set-hostname" ]]; then
+    log_info "Enabling first-boot hostname generation (MAC-based) ..."
+    chmod +x "${ROOTFS_DIR}/usr/local/bin/set-hostname"
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable set-hostname-firstboot.service 2>/dev/null || true
 CHROOTEOF
 fi
 

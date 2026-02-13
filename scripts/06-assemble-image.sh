@@ -18,6 +18,17 @@ UBOOT_ITB="${TMP_DIR}/u-boot.itb"
 
 [[ -d "${ROOTFS_DIR}/etc" ]] || die "Rootfs not found at ${ROOTFS_DIR}. Run 04-customize-rootfs.sh first."
 
+# ── calculate image size ───────────────────────────────────────────────────
+if [[ "${IMAGE_SIZE_MB}" == "auto" ]]; then
+    ROOTFS_USED_MB="$(du -sm "${ROOTFS_DIR}" | awk '{print $1}')"
+    # Add 20% headroom + bootloader area, round up to nearest 64 MB
+    HEADROOM_MB=$(( ROOTFS_USED_MB / 5 ))
+    [[ "$HEADROOM_MB" -lt 128 ]] && HEADROOM_MB=128
+    IMAGE_SIZE_MB=$(( ROOTFS_USED_MB + HEADROOM_MB + ROOTFS_OFFSET_MB ))
+    IMAGE_SIZE_MB=$(( (IMAGE_SIZE_MB + 63) / 64 * 64 ))
+    log_info "Rootfs is ${ROOTFS_USED_MB}M → auto-sized image to ${IMAGE_SIZE_MB}M"
+fi
+
 # ── create sparse image ─────────────────────────────────────────────────────
 log_info "Creating ${IMAGE_SIZE_MB}M sparse image ..."
 truncate -s "${IMAGE_SIZE_MB}M" "$IMG_FILE"
