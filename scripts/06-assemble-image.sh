@@ -7,6 +7,10 @@ BOARD="${1:?usage: $0 <board>}"
 load_config "$BOARD"
 require_sudo
 
+# Defaults for optional board config variables
+BOOT_PART_ENABLE="${BOOT_PART_ENABLE:-false}"
+WRITE_RAW_BOOTLOADER="${WRITE_RAW_BOOTLOADER:-true}"
+
 log_step "Assembling image for ${BOARD_NAME}"
 
 ensure_dir "$IMAGE_OUT"
@@ -36,8 +40,21 @@ truncate -s "${IMAGE_SIZE_MB}M" "$IMG_FILE"
 # ── GPT partition table ─────────────────────────────────────────────────────
 log_info "Creating GPT partition table ..."
 parted -s "$IMG_FILE" mklabel gpt
-parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_OFFSET_MB}MiB" 100%
-parted -s "$IMG_FILE" set 1 legacy_boot on
+
+if [[ "$BOOT_PART_ENABLE" == "true" ]]; then
+    # EFI System Partition (empty FAT16, triggers vendor U-Boot distro boot)
+    BOOT_START=$(( BOOT_PART_OFFSET_SECTOR * 512 ))B
+    BOOT_END=$(( (BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS) * 512 ))B
+    log_info "Creating ESP: sector ${BOOT_PART_OFFSET_SECTOR} – $(( BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS ))"
+    parted -s "$IMG_FILE" mkpart ESP fat16 "${BOOT_START}" "${BOOT_END}"
+    parted -s "$IMG_FILE" set 1 esp on
+    parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_OFFSET_MB}MiB" 100%
+    ROOTFS_PART_NUM=2
+else
+    parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_OFFSET_MB}MiB" 100%
+    parted -s "$IMG_FILE" set 1 legacy_boot on
+    ROOTFS_PART_NUM=1
+fi
 
 # ── set up loop device ──────────────────────────────────────────────────────
 # Ensure loop devices are available (kernel built-in may need device nodes created)
@@ -57,8 +74,17 @@ LOOP_DEV="$(losetup --find --show --partscan "$IMG_FILE")"
 cleanup_push "losetup -d ${LOOP_DEV}"
 log_info "Loop device: ${LOOP_DEV}"
 
-# Wait for partition device to appear
-PART_DEV="${LOOP_DEV}p1"
+# ── format ESP (if enabled) ───────────────────────────────────────────────────
+if [[ "$BOOT_PART_ENABLE" == "true" ]]; then
+    ESP_DEV="${LOOP_DEV}p1"
+    for i in $(seq 1 10); do [[ -b "$ESP_DEV" ]] && break; sleep 0.5; done
+    [[ -b "$ESP_DEV" ]] || die "ESP device ${ESP_DEV} did not appear."
+    log_info "Formatting ${ESP_DEV} as FAT16 (ESP) ..."
+    mkfs.fat -F 16 -n "ESP" "$ESP_DEV"
+fi
+
+# Wait for rootfs partition device to appear
+PART_DEV="${LOOP_DEV}p${ROOTFS_PART_NUM}"
 for i in $(seq 1 10); do
     [[ -b "$PART_DEV" ]] && break
     sleep 0.5
@@ -72,7 +98,7 @@ mkfs.ext4 -L "$ROOTFS_LABEL" -q "$PART_DEV"
 # ── get PARTUUID of the new partition ────────────────────────────────────────
 # The kernel needs PARTUUID to find root without an initramfs (LABEL= requires
 # userspace tools). We use sfdisk to extract the partition UUID from the GPT.
-PART_UUID="$(sfdisk --part-uuid "$LOOP_DEV" 1)"
+PART_UUID="$(sfdisk --part-uuid "$LOOP_DEV" "$ROOTFS_PART_NUM")"
 log_info "Partition UUID: ${PART_UUID}"
 
 # ── mount and copy rootfs ───────────────────────────────────────────────────
@@ -103,18 +129,22 @@ umount "$MNT"
 unset '_CLEANUP_STACK[-1]'
 
 # ── write bootloader at raw offsets ──────────────────────────────────────────
-if [[ -f "$IDBLOADER" ]]; then
-    log_info "Writing idbloader.img at sector ${UBOOT_IDBLOADER_OFFSET} ..."
-    dd if="$IDBLOADER" of="$LOOP_DEV" seek="${UBOOT_IDBLOADER_OFFSET}" conv=notrunc,fsync bs=512 status=none
-else
-    log_warn "idbloader.img not found — skipping (image will not boot)."
-fi
+if [[ "${WRITE_RAW_BOOTLOADER}" == "true" ]]; then
+    if [[ -f "$IDBLOADER" ]]; then
+        log_info "Writing idbloader.img at sector ${UBOOT_IDBLOADER_OFFSET} ..."
+        dd if="$IDBLOADER" of="$LOOP_DEV" seek="${UBOOT_IDBLOADER_OFFSET}" conv=notrunc,fsync bs=512 status=none
+    else
+        log_warn "idbloader.img not found — skipping (image will not boot)."
+    fi
 
-if [[ -f "$UBOOT_ITB" ]]; then
-    log_info "Writing u-boot.itb at sector ${UBOOT_ITB_OFFSET} ..."
-    dd if="$UBOOT_ITB" of="$LOOP_DEV" seek="${UBOOT_ITB_OFFSET}" conv=notrunc,fsync bs=512 status=none
+    if [[ -f "$UBOOT_ITB" ]]; then
+        log_info "Writing u-boot.itb at sector ${UBOOT_ITB_OFFSET} ..."
+        dd if="$UBOOT_ITB" of="$LOOP_DEV" seek="${UBOOT_ITB_OFFSET}" conv=notrunc,fsync bs=512 status=none
+    else
+        log_warn "u-boot.itb not found — skipping (image will not boot)."
+    fi
 else
-    log_warn "u-boot.itb not found — skipping (image will not boot)."
+    log_info "Skipping raw bootloader writes (WRITE_RAW_BOOTLOADER=false)"
 fi
 
 # ── detach loop ──────────────────────────────────────────────────────────────

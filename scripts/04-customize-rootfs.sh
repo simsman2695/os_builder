@@ -328,9 +328,9 @@ CHROOTEOF
 
     # Install Mesa Teflon delegate (libteflon.so) for Rocket NPU inference.
     # Ubuntu 25.04+ ships Mesa 25.3+ in the repos (includes libteflon).
-    # Ubuntu 24.04 needs a source build since even the Oibaf PPA only has 25.2.
+    # Ubuntu 24.04 needs a cross-compiled build since even the Oibaf PPA only has 25.2.
     if [[ "${UBUNTU_VERSION}" == "24.04" ]]; then
-        log_info "Building Mesa Teflon delegate (libteflon.so) from source (24.04) ..."
+        log_info "Cross-compiling Mesa Teflon delegate (libteflon.so) for aarch64 ..."
         MESA_VERSION="25.3.3"
         MESA_TARBALL="${TMP_DIR}/mesa-${MESA_VERSION}.tar.xz"
         if [[ ! -f "$MESA_TARBALL" ]]; then
@@ -338,62 +338,100 @@ CHROOTEOF
                 -O "$MESA_TARBALL"
         fi
 
-        # Install build dependencies inside chroot
-        # Note: Ubuntu 24.04 ships meson 1.3.2 but Mesa 25.3 requires >= 1.4.0,
-        # so we install meson via pip3 instead of the apt package.
+        # ── verify host cross-compilation tools ──────────────────────────────
+        command -v aarch64-linux-gnu-gcc-12 &>/dev/null || \
+            die "aarch64-linux-gnu-gcc-12 not found. Install: sudo apt install gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu"
+        command -v ninja &>/dev/null || \
+            die "ninja not found. Install: sudo apt install ninja-build"
+        command -v pkg-config &>/dev/null || \
+            die "pkg-config not found. Install: sudo apt install pkg-config"
+        python3 -c "import mako" 2>/dev/null || \
+            die "python3-mako not found. Install: sudo apt install python3-mako"
+
+        # Ensure meson >= 1.4.0 on host (Mesa 25.3 requirement)
+        NEED_MESON=true
+        if command -v meson &>/dev/null; then
+            MESON_VER="$(meson --version)"
+            if python3 -c "import sys; v='${MESON_VER}'.split('.'); sys.exit(0 if (int(v[0]),int(v[1])) >= (1,4) else 1)" 2>/dev/null; then
+                NEED_MESON=false
+            fi
+        fi
+        if [[ "$NEED_MESON" == "true" ]]; then
+            log_info "Installing meson >= 1.4.0 via pip3 (host) ..."
+            pip3 install --break-system-packages "meson>=1.4.0" || \
+                die "Failed to install meson. Install manually: pip3 install 'meson>=1.4.0'"
+        fi
+
+        # ── install aarch64 dev headers in chroot (rootfs used as sysroot) ───
         chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    gcc g++ ninja-build pkg-config python3-pip python3-packaging \
-    python3-setuptools \
-    python3-mako python3-yaml python3-ply \
-    flex bison \
     libdrm-dev libexpat1-dev libelf-dev zlib1g-dev
-pip3 install --break-system-packages meson>=1.4.0
+apt-get clean
+rm -rf /var/lib/apt/lists/*
 CHROOTEOF
 
-        # Extract, configure, build (only the teflon target)
-        ensure_dir "${ROOTFS_DIR}/tmp/mesa-build"
-        tar xf "$MESA_TARBALL" -C "${ROOTFS_DIR}/tmp/mesa-build/" --strip-components=1
+        # ── extract Mesa source on host ──────────────────────────────────────
+        MESA_BUILD_DIR="${TMP_DIR}/mesa-cross-build"
+        rm -rf "$MESA_BUILD_DIR"
+        mkdir -p "$MESA_BUILD_DIR"
+        tar xf "$MESA_TARBALL" -C "$MESA_BUILD_DIR" --strip-components=1
 
-        chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
-# Override cross-compiler env vars inherited from host — inside the
-# qemu-user chroot we are already aarch64 so use native gcc.
-unset CROSS_COMPILE
-export CC=gcc
-export CXX=g++
+        # ── create Meson cross-file targeting rootfs as sysroot ──────────────
+        cat > "${MESA_BUILD_DIR}/aarch64-cross.txt" <<CROSSEOF
+[binaries]
+c = 'aarch64-linux-gnu-gcc-12'
+cpp = 'aarch64-linux-gnu-g++-12'
+ar = 'aarch64-linux-gnu-ar'
+strip = 'aarch64-linux-gnu-strip'
+pkgconfig = 'pkg-config'
 
-cd /tmp/mesa-build
-meson setup build \
-    -Dgallium-drivers=rocket \
-    -Dvulkan-drivers= \
-    -Dteflon=true \
-    -Dglx=disabled \
-    -Degl=disabled \
-    -Dgles1=disabled \
-    -Dgles2=disabled \
-    -Dplatforms= \
-    -Dllvm=disabled \
-    -Dbuildtype=release \
-    -Dprefix=/usr
+[built-in options]
+c_args = ['--sysroot=${ROOTFS_DIR}']
+c_link_args = ['--sysroot=${ROOTFS_DIR}']
+cpp_args = ['--sysroot=${ROOTFS_DIR}']
+cpp_link_args = ['--sysroot=${ROOTFS_DIR}']
 
-ninja -C build src/gallium/targets/teflon/libteflon.so
+[properties]
+sys_root = '${ROOTFS_DIR}'
+pkg_config_libdir = '${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu/pkgconfig:${ROOTFS_DIR}/usr/share/pkgconfig'
 
-# Install just the teflon delegate library
-install -m 755 build/src/gallium/targets/teflon/libteflon.so /usr/lib/aarch64-linux-gnu/
-CHROOTEOF
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+CROSSEOF
 
-        # Clean up build tree and build-only deps
-        rm -rf "${ROOTFS_DIR}/tmp/mesa-build"
+        # ── configure and build on host (native speed, full parallelism) ─────
+        # Unset kernel cross-compile env vars — Meson uses the cross-file
+        env -u CROSS_COMPILE -u CC -u CXX \
+            meson setup "${MESA_BUILD_DIR}/build" "$MESA_BUILD_DIR" \
+                --cross-file "${MESA_BUILD_DIR}/aarch64-cross.txt" \
+                -Dgallium-drivers=rocket \
+                -Dvulkan-drivers= \
+                -Dteflon=true \
+                -Dglx=disabled \
+                -Degl=disabled \
+                -Dgles1=disabled \
+                -Dgles2=disabled \
+                -Dplatforms= \
+                -Dllvm=disabled \
+                -Dbuildtype=release \
+                -Dprefix=/usr
+
+        ninja -C "${MESA_BUILD_DIR}/build" src/gallium/targets/teflon/libteflon.so
+
+        # ── install cross-compiled library into rootfs ────────────────────────
+        install -m 755 "${MESA_BUILD_DIR}/build/src/gallium/targets/teflon/libteflon.so" \
+            "${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu/"
+
+        # ── clean up build tree and dev packages from rootfs ─────────────────
+        rm -rf "$MESA_BUILD_DIR"
         chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 export DEBIAN_FRONTEND=noninteractive
-pip3 uninstall -y --break-system-packages meson
-apt-get remove -y gcc g++ ninja-build pkg-config python3-pip flex bison \
-    python3-setuptools \
-    python3-mako python3-ply \
-    libexpat1-dev libelf-dev zlib1g-dev
-# Note: python3-yaml is deliberately kept — netplan.io depends on it
+apt-get remove -y libexpat1-dev libelf-dev zlib1g-dev
 apt-get autoremove -y
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -551,6 +589,58 @@ if [[ -f "${ROOTFS_DIR}/usr/local/bin/set-hostname" ]]; then
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable set-hostname-firstboot.service 2>/dev/null || true
 CHROOTEOF
+fi
+
+# ── install node registration agent (if configured) ──────────────────────────
+if [[ -n "${NODE_AGENT_SRC:-}" && -d "${NODE_AGENT_SRC}/dist" ]]; then
+    log_info "Installing node registration agent from ${NODE_AGENT_SRC} ..."
+
+    # Install Node.js runtime
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends nodejs
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+CHROOTEOF
+
+    # Deploy agent to /opt/node-registration-agent/
+    AGENT_DEST="${ROOTFS_DIR}/opt/node-registration-agent"
+    ensure_dir "$AGENT_DEST"
+    cp -r "${NODE_AGENT_SRC}/dist" "$AGENT_DEST/"
+    cp "${NODE_AGENT_SRC}/package.json" "$AGENT_DEST/"
+
+    # Copy only production dependencies (dotenv)
+    ensure_dir "${AGENT_DEST}/node_modules"
+    cp -r "${NODE_AGENT_SRC}/node_modules/dotenv" "${AGENT_DEST}/node_modules/"
+
+    # Default .env (override with NODE_AGENT_ENV or edit on device)
+    if [[ -n "${NODE_AGENT_ENV:-}" && -f "${NODE_AGENT_ENV}" ]]; then
+        cp "${NODE_AGENT_ENV}" "${AGENT_DEST}/.env"
+    elif [[ -f "${NODE_AGENT_SRC}/.env" ]]; then
+        cp "${NODE_AGENT_SRC}/.env" "${AGENT_DEST}/.env"
+    else
+        cat > "${AGENT_DEST}/.env" <<'ENVEOF'
+API_URL=http://localhost:3002
+API_KEY=changeme-default-api-key
+INTERVAL_MS=60000
+MAC_OVERRIDE=
+ENVEOF
+    fi
+
+    # Install systemd service
+    cp "${NODE_AGENT_SRC}/scripts/node-registration-agent.service" \
+        "${ROOTFS_DIR}/etc/systemd/system/node-registration-agent.service"
+
+    # Enable the service
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable node-registration-agent.service 2>/dev/null || true
+CHROOTEOF
+
+    log_info "Node registration agent installed and enabled."
+elif [[ -n "${NODE_AGENT_SRC:-}" ]]; then
+    log_warn "NODE_AGENT_SRC set to ${NODE_AGENT_SRC} but dist/ not found — skipping. Run 'npm run build' first."
 fi
 
 # ── final cleanup inside rootfs ─────────────────────────────────────────────
