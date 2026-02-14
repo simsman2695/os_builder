@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+/plugin/;
+
+/*
+ * Enable GMAC1 (Rockchip internal Ethernet) for Symbiote board.
+ *
+ * The base rk3588-rock-5b.dtb has GMAC1 disabled because the Rock 5B
+ * uses PCIe Realtek 2.5GbE instead. Symbiote hardware uses GMAC1 with
+ * an RTL8211F PHY in RGMII mode on the same RK3588 SoC.
+ *
+ * PHY: Realtek RTL8211F at MDIO address 1
+ * Reset: GPIO4_B7 (gpio4 pin 15), active low
+ * TX/RX delays: matched to MFG reference image (tx=0x3c, rx=0x35)
+ */
+
+&gmac1 {
+	status = "okay";
+	phy-mode = "rgmii";
+	clock_in_out = "output";
+
+	snps,reset-gpio = <&gpio4 15 1>;	/* GPIO4_B7, active low */
+	snps,reset-active-low;
+	snps,reset-delays-us = <0 20000 100000>;
+
+	tx_delay = <0x3c>;
+	rx_delay = <0x35>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&gmac1_miim
+		     &gmac1_tx_bus2
+		     &gmac1_rx_bus2
+		     &gmac1_rgmii_clk
+		     &gmac1_rgmii_bus>;
+
+	phy-handle = <&gmac1_phy>;
+
+	mdio {
+		gmac1_phy: phy@1 {
+			compatible = "ethernet-phy-ieee802.3-c22";
+			reg = <1>;
+		};
+	};
+};

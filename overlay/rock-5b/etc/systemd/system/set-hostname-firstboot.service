@@ -1,6 +1,6 @@
 [Unit]
 Description=Set unique hostname from MAC address (first boot)
-After=sys-subsystem-net-devices-end0.device systemd-networkd.service
+After=systemd-udevd.service systemd-networkd.service
 Before=systemd-resolved.service remote.it.service
 ConditionPathExists=!/var/lib/set-hostname.done
 DefaultDependencies=no
@@ -8,7 +8,6 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/set-hostname
-ExecStartPost=/bin/touch /var/lib/set-hostname.done
 RemainAfterExit=yes
 
 [Install]

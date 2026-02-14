@@ -470,6 +470,26 @@ for dtb in "${DTB_TARGETS[@]}"; do
     fi
 done
 
+# ── apply device tree overlays (board-specific hardware enablement) ────────
+if [[ -v DT_OVERLAYS && ${#DT_OVERLAYS[@]} -gt 0 ]]; then
+    log_info "Applying device tree overlays ..."
+    for overlay_src in "${DT_OVERLAYS[@]}"; do
+        overlay_path="${BUILDER_DIR}/${overlay_src}"
+        [[ -f "$overlay_path" ]] || die "DT overlay not found: ${overlay_path}"
+        dtbo_file="${overlay_path%.dts}.dtbo"
+        log_info "  Compiling: $(basename "$overlay_src")"
+        dtc -@ -I dts -O dtb -o "$dtbo_file" "$overlay_path" 2>/dev/null
+        for dtb in "${DTB_TARGETS[@]}"; do
+            dtb_path="${ROOTFS_DIR}/boot/${dtb}"
+            if [[ -f "$dtb_path" ]]; then
+                log_info "  Merging into ${dtb}"
+                fdtoverlay -i "$dtb_path" -o "${dtb_path}.tmp" "$dtbo_file"
+                mv "${dtb_path}.tmp" "$dtb_path"
+            fi
+        done
+    done
+fi
+
 # Install modules
 if [[ -d "${KERNEL_OUT}/modules/lib/modules" ]]; then
     rsync -a "${KERNEL_OUT}/modules/lib/modules/" "${ROOTFS_DIR}/lib/modules/"
@@ -495,6 +515,7 @@ NAME="cpedgeOS"
 PRETTY_NAME="cpedgeOS ${UBUNTU_VERSION}"
 VERSION_ID="${UBUNTU_VERSION}"
 VERSION="${UBUNTU_VERSION}"
+BUILD_ID="${BUILD_ID}"
 ID=cpedgeos
 ID_LIKE=ubuntu
 HOME_URL="https://github.com/cpedge"
@@ -511,12 +532,65 @@ rm -f "${ROOTFS_DIR}/etc/update-motd.d/10-help-text"
 rm -f "${ROOTFS_DIR}/etc/update-motd.d/50-motd-news"
 rm -f "${ROOTFS_DIR}/etc/update-motd.d/88-esm-announce"
 rm -f "${ROOTFS_DIR}/etc/update-motd.d/91-contract-ua-esm-status"
-# Replace the header with cpedgeOS branding
+# Replace the header with cpedgeOS branding + system info
 cat > "${ROOTFS_DIR}/etc/update-motd.d/00-header" <<'MOTDEOF'
 #!/bin/sh
 . /etc/os-release
-printf "Welcome to %s (%s %s %s)\n" "$PRETTY_NAME" "$(uname -o)" "$(uname -r)" "$(uname -m)"
-printf "(c) 2026 CPEdge Inc. All rights reserved.\n"
+
+# ── ASCII art ──────────────────────────────────────────────
+printf "\n\n"
+printf "\033[1;36m"
+cat <<'ART'
+   __________  ______    __              ____  _____
+  / ____/ __ \/ ____/___/ /___ ____     / __ \/ ___/
+ / /   / /_/ / __/ / __  / __ `/ _ \   / / / /\__ \
+/ /___/ ____/ /___/ /_/ / /_/ /  __/  / /_/ /___/ /
+\____/_/   /_____/\__,_/\__, /\___/   \____//____/
+                        /____/
+ART
+printf "\033[0m"
+
+# ── system info ────────────────────────────────────────────
+cpu_model=$(awk -F': ' '/^Hardware/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+[ -z "$cpu_model" ] && cpu_model=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+[ -z "$cpu_model" ] && cpu_model=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
+cpu_cores=$(nproc 2>/dev/null || echo "?")
+
+mem_total=$(awk '/^MemTotal/{printf "%.1f", $2/1024/1024}' /proc/meminfo)
+mem_avail=$(awk '/^MemAvailable/{printf "%.1f", $2/1024/1024}' /proc/meminfo)
+
+disk_total=$(df -h / 2>/dev/null | awk 'NR==2{print $2}')
+disk_used=$(df -h / 2>/dev/null | awk 'NR==2{print $3}')
+disk_avail=$(df -h / 2>/dev/null | awk 'NR==2{print $4}')
+disk_pct=$(df -h / 2>/dev/null | awk 'NR==2{print $5}')
+
+up=$(uptime -p 2>/dev/null | sed 's/^up //')
+load=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+
+ip_addrs=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -3 | tr '\n' ' ')
+
+cpu_temp=""
+for tz in /sys/class/thermal/thermal_zone*/temp; do
+    if [ -f "$tz" ]; then
+        t=$(cat "$tz" 2>/dev/null)
+        if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then
+            cpu_temp="$(echo "$t" | awk '{printf "%.1f°C", $1/1000}')"
+            break
+        fi
+    fi
+done
+
+printf "  \033[1;37m%-14s\033[0m %s (%s cores)\n" "CPU:" "$cpu_model" "$cpu_cores"
+printf "  \033[1;37m%-14s\033[0m %s GB available / %s GB total\n" "Memory:" "$mem_avail" "$mem_total"
+printf "  \033[1;37m%-14s\033[0m %s used / %s total (%s) — %s free\n" "Storage:" "$disk_used" "$disk_total" "$disk_pct" "$disk_avail"
+[ -n "$cpu_temp" ] && printf "  \033[1;37m%-14s\033[0m %s\n" "CPU Temp:" "$cpu_temp"
+printf "  \033[1;37m%-14s\033[0m %s\n" "Uptime:" "$up"
+printf "  \033[1;37m%-14s\033[0m %s\n" "Load:" "$load"
+printf "  \033[1;37m%-14s\033[0m %s\n" "IP:" "$ip_addrs"
+printf "  \033[1;37m%-14s\033[0m %s %s %s\n" "Kernel:" "$(uname -r)" "$(uname -m)"
+printf "  \033[1;37m%-14s\033[0m %s\n" "OS:" "$PRETTY_NAME"
+printf "  \033[1;37m%-14s\033[0m %s\n" "Build:" "$BUILD_ID"
+printf "\n  \033[0;90m(c) 2026 CPEdge Inc.\033[0m\n\n"
 MOTDEOF
 chmod +x "${ROOTFS_DIR}/etc/update-motd.d/00-header"
 # Remove Ubuntu legal notice ("The programs included with the Ubuntu system...")
@@ -595,10 +669,12 @@ fi
 if [[ -n "${NODE_AGENT_SRC:-}" && -d "${NODE_AGENT_SRC}/dist" ]]; then
     log_info "Installing node registration agent from ${NODE_AGENT_SRC} ..."
 
-    # Install Node.js runtime
+    # Install Node.js 22.x LTS (includes npm) via NodeSource
     chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y --no-install-recommends nodejs
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -611,8 +687,16 @@ CHROOTEOF
     cp "${NODE_AGENT_SRC}/package.json" "$AGENT_DEST/"
 
     # Copy only production dependencies (dotenv)
+    # Use -rL to dereference pnpm symlinks (they point to ../../.pnpm/... which
+    # won't exist on the device).
     ensure_dir "${AGENT_DEST}/node_modules"
-    cp -r "${NODE_AGENT_SRC}/node_modules/dotenv" "${AGENT_DEST}/node_modules/"
+    cp -rL "${NODE_AGENT_SRC}/node_modules/dotenv" "${AGENT_DEST}/node_modules/"
+
+    # Install dependencies on target
+    chroot "$ROOTFS_DIR" /bin/bash -e <<'CHROOTEOF'
+cd /opt/node-registration-agent
+npm install
+CHROOTEOF
 
     # Default .env (override with NODE_AGENT_ENV or edit on device)
     if [[ -n "${NODE_AGENT_ENV:-}" && -f "${NODE_AGENT_ENV}" ]]; then

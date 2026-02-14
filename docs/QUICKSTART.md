@@ -1,13 +1,26 @@
-# cpedgeOS Quick Start — Rock 5B
+# cpedgeOS Quick Start
+
+## Supported Boards
+
+| Board | Config | Description |
+|-------|--------|-------------|
+| `rock-5b` | `config/boards/rock-5b.conf` | Radxa Rock 5B (bootloader written to image) |
+| `symbiote` | `config/boards/symbiote.conf` | Symbiote (vendor U-Boot in SPI NOR, ESP partition) |
 
 ## Build Commands
 
 ```bash
-# Default: vendor kernel 6.1, Ubuntu 24.04
+# Rock 5B — vendor kernel 6.1, Ubuntu 24.04
 sudo ./build.sh rock-5b
 
-# Mainline kernel 6.18 (Panthor GPU + Rocket NPU)
+# Rock 5B — mainline kernel 6.18 (Panthor GPU + Rocket NPU)
 sudo KERNEL_PROFILE=6.18 ./build.sh rock-5b
+
+# Symbiote — vendor kernel 6.1
+sudo ./build.sh symbiote
+
+# Symbiote — mainline kernel 6.18
+sudo KERNEL_PROFILE=6.18 ./build.sh symbiote
 
 # Ubuntu 25.04 (Mesa Teflon from repos, no source build needed)
 sudo UBUNTU_VERSION=25.04 KERNEL_PROFILE=6.18 ./build.sh rock-5b
@@ -19,16 +32,33 @@ sudo ./build.sh --prebuilt-uboot rock-5b
 sudo ./build.sh rock-5b kernel image
 ```
 
-Output image: `../os_images/<kernel-ver>/<soc>/rock-5b-cpedgeos-24.04.img`
+### Host Build Dependencies
+
+The mainline 6.18 kernel profile with `KERNEL_PROFILE=6.18` cross-compiles Mesa Teflon on the host (not under QEMU). Ensure these are installed:
+
+```bash
+sudo apt install ninja-build python3-mako pkg-config \
+    gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu
+```
+
+Meson >= 1.4.0 is auto-installed via pip3 if needed.
+
+### Output
+
+Image: `../os_images/<kernel-ver>/<soc>/<board>-cpedgeos-<ubuntu-ver>-v<timestamp>.img`
+
+Example: `symbiote-cpedgeos-24.04-v1771035186.img`
+
+The `v<timestamp>` build ID is a Unix timestamp embedded in the filename, `/etc/os-release`, and shown in the login MOTD for version tracking.
 
 ## Flash to SD Card
 
 ```bash
-sudo dd if=rock-5b-cpedgeos-24.04.img of=/dev/sdX bs=4M status=progress
+sudo dd if=rock-5b-cpedgeos-24.04-v1771035186.img of=/dev/sdX bs=4M status=progress
 sync
 
 # Verify
-sha256sum -c rock-5b-cpedgeos-24.04.img.sha256
+sha256sum -c rock-5b-cpedgeos-24.04-v1771035186.img.sha256
 ```
 
 Replace `/dev/sdX` with your SD card device.
@@ -56,7 +86,7 @@ sudo dd if=rock-5b-spi-image-gd1cf491-20240523.img of=/dev/mtdblock0 bs=4096 con
 ### 2. Write OS image to NVMe
 
 ```bash
-sudo dd if=rock-5b-cpedgeos-24.04.img of=/dev/nvme0n1 bs=4M status=progress
+sudo dd if=rock-5b-cpedgeos-24.04-v1771035186.img of=/dev/nvme0n1 bs=4M status=progress
 sync
 ```
 
@@ -71,7 +101,7 @@ The NVMe driver must be built-in (`CONFIG_BLK_DEV_NVME=y`, `CONFIG_NVME_CORE=y`)
 | User | `cpedge` |
 | Password | `cpedge` |
 | Sudo | Passwordless (`NOPASSWD`) |
-| SSH keys | `overlay/rock-5b/home/cpedge/.ssh/authorized_keys` |
+| SSH keys | `overlay/<board>/home/cpedge/.ssh/authorized_keys` |
 
 ## Serial Console
 
@@ -84,6 +114,19 @@ The NVMe driver must be built-in (`CONFIG_BLK_DEV_NVME=y`, `CONFIG_NVME_CORE=y`)
 screen /dev/ttyUSB0 1500000
 ```
 
+## Login MOTD
+
+On SSH login, the system displays a branded banner with live system stats:
+
+- CPU model, core count (read from device-tree on mainline)
+- Memory total / available
+- Storage total / used / free
+- CPU temperature
+- Uptime, load average
+- IP addresses
+- Kernel version
+- OS version and build ID (`v<timestamp>`)
+
 ## What's on the Image
 
 ### Kernel / Driver Stack
@@ -94,6 +137,8 @@ screen /dev/ttyUSB0 1500000
 | NPU driver | RKNPU2 (`librknnrt.so`) | Rocket (DRM accel, open-source) |
 | NPU inference | rknn-toolkit-lite2 | TFLite + libteflon.so (Mesa) |
 | NPU device | `/dev/rknpu` | `/dev/accel/accel0` |
+
+**Note:** On 6.18 with Ubuntu 24.04, Mesa Teflon (`libteflon.so`) is cross-compiled on the host at native x86 speed using `aarch64-linux-gnu-gcc-12`. This avoids the slow QEMU-emulated build.
 
 ### Virtualization
 
@@ -106,9 +151,28 @@ KVM, QEMU (`qemu-system-arm`), libvirt, LXC, nftables, bridge-utils
 - DNS: systemd-resolved with fallback to 8.8.8.8 / 1.1.1.1
 - Hostname: `cpedge-<mac>` (auto-generated from MAC address on first boot)
 
+### Node Registration Agent
+
+Installed when `NODE_AGENT_SRC` is set in the board config (enabled for both rock-5b and symbiote).
+
+- **Runtime:** Node.js 22.x LTS with npm (via NodeSource)
+- **Location:** `/opt/node-registration-agent/`
+- **Service:** `node-registration-agent.service` (enabled, auto-starts on boot)
+- **Config:** `/opt/node-registration-agent/.env` (API URL, API key, polling interval)
+
+```bash
+# Manage the agent
+sudo systemctl status node-registration-agent
+sudo systemctl stop node-registration-agent
+sudo systemctl start node-registration-agent
+sudo journalctl -u node-registration-agent -f
+```
+
+Override the `.env` at build time with `NODE_AGENT_ENV=/path/to/.env` or edit on the device.
+
 ## Boot Sequence
 
-### Image Disk Layout
+### Image Disk Layout — Rock 5B
 
 ```
  0          32 MiB                                   end of image
@@ -122,12 +186,35 @@ KVM, QEMU (`qemu-system-arm`), libvirt, LXC, nftables, bridge-utils
 - U-Boot bootloader written into the gap before the partition
 - fstab: `LABEL=rootfs  /  ext4  defaults,noatime  0  1`
 
-### Boot Chain (SD / eMMC)
+### Image Disk Layout — Symbiote
+
+```
+ 0    24 MiB   64 MiB                                end of image
+ |--gap--|--ESP (40M)--|------- rootfs (ext4, GPT) ------|
+```
+
+- **ESP** (EFI System Partition): sectors 49152–131071 (24 MiB – 64 MiB), FAT16, empty
+- **rootfs**: starts at sector 131072 (64 MiB)
+- No bootloader written to image — vendor U-Boot lives in SPI NOR
+- The empty ESP triggers vendor U-Boot's distro boot detection
+
+### Boot Chain (SD / eMMC) — Rock 5B
 
 ```
 RK3588 Boot ROM
   → idbloader.img (TPL + SPL, sector 64)
     → u-boot.itb (ATF + U-Boot proper, sector 16384)
+      → extlinux.conf (/boot/extlinux/extlinux.conf)
+        → kernel Image + DTB + cmdline
+          → systemd (PID 1)
+```
+
+### Boot Chain — Symbiote (SPI NOR)
+
+```
+RK3588 Boot ROM
+  → Vendor U-Boot in SPI NOR flash
+    → Finds ESP in GPT → triggers distro boot
       → extlinux.conf (/boot/extlinux/extlinux.conf)
         → kernel Image + DTB + cmdline
           → systemd (PID 1)
@@ -188,7 +275,18 @@ sudo growpart /dev/mmcblk0 1    # or /dev/nvme0n1 1
 sudo resize2fs /dev/mmcblk0p1   # or /dev/nvme0n1p1
 ```
 
-### 2. systemd Brings Up Services
+### 2. Hostname Generation (first boot)
+
+**Service:** `set-hostname-firstboot.service`
+
+Sets a unique hostname from the primary Ethernet MAC address:
+
+1. Waits up to 15 seconds for an `en*` network interface to appear
+2. Reads the MAC address and generates `cpedge-<last-3-octets>` (e.g., `cpedge-032ae2`)
+3. Writes to `/etc/hostname` and updates `/etc/hosts`
+4. Marks done — won't run again
+
+### 3. systemd Brings Up Services
 
 Key services start in this order (approximate):
 
@@ -201,12 +299,13 @@ Key services start in this order (approximate):
 | `serial-getty@<tty>` | Login prompt on serial console |
 | `getty@tty1` | Login prompt on HDMI |
 | `ssh` | OpenSSH server (accepts key + password auth) |
+| `node-registration-agent` | Node registration agent (reports to API) |
 | `lxc-net` | LXC bridge network (`lxcbr0`) |
 | `multi-user.target` | System fully up — triggers hw-test |
 
 **Masked:** `systemd-networkd-wait-online` — prevents boot from hanging if no DHCP server is reachable.
 
-### 3. Hardware Test (after multi-user.target, ~10-30 min)
+### 4. Hardware Test (after multi-user.target, ~10-30 min)
 
 **Service:** `hw-test-firstboot.service`
 
@@ -229,7 +328,7 @@ sudo journalctl -u hw-test-firstboot.service -f
 systemctl status hw-test-firstboot.service
 ```
 
-### 4. System Ready
+### 5. System Ready
 
 After hw-test completes, the system is idle and ready for use. Login via:
 
@@ -248,7 +347,7 @@ ip addr show
 
 On all boots after the first:
 
-- Resize and hw-test services skip (marker files exist)
+- Resize, hostname, and hw-test services skip (marker files exist)
 - Boot to login prompt takes ~15-25 seconds (SD card) or ~10-15 seconds (NVMe)
 - All services from the table above start normally
 
@@ -283,14 +382,19 @@ Logs: `/var/log/hw-test/`
 | `/boot/extlinux/extlinux.conf` | U-Boot boot config |
 | `/etc/netplan/01-netcfg.yaml` | Network config (DHCP on `en*`) |
 | `/etc/fstab` | `LABEL=rootfs / ext4 defaults,noatime 0 1` |
-| `/etc/os-release` | `cpedgeOS <version>` branding |
+| `/etc/os-release` | `cpedgeOS <version>` branding + `BUILD_ID` |
+| `/etc/hostname` | Hostname (set to `cpedge-<mac>` on first boot) |
 | `/etc/resolv.conf` | Static DNS (127.0.0.53 + 8.8.8.8 + 1.1.1.1) |
 | `/etc/sudoers.d/cpedge` | Passwordless sudo for cpedge user |
 | `/home/cpedge/.ssh/authorized_keys` | Pre-installed SSH public keys |
 | `/usr/local/bin/hw-test` | Hardware test suite |
 | `/usr/local/bin/resize-rootfs` | First-boot partition resize |
+| `/usr/local/bin/set-hostname` | First-boot hostname generation |
+| `/opt/node-registration-agent/` | Node registration agent (Node.js) |
+| `/opt/node-registration-agent/.env` | Agent config (API URL, key, interval) |
 | `/var/log/hw-test/` | Test logs and HTML reports |
 | `/var/lib/resize-rootfs/done` | Resize completion marker |
+| `/var/lib/set-hostname.done` | Hostname set marker |
 | `/var/lib/hw-test/first-boot-complete` | hw-test completion marker |
 
 ## NVMe Boot Troubleshooting

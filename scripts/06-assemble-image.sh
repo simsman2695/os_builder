@@ -43,12 +43,16 @@ parted -s "$IMG_FILE" mklabel gpt
 
 if [[ "$BOOT_PART_ENABLE" == "true" ]]; then
     # EFI System Partition (empty FAT16, triggers vendor U-Boot distro boot)
-    BOOT_START=$(( BOOT_PART_OFFSET_SECTOR * 512 ))B
-    BOOT_END=$(( (BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS) * 512 ))B
-    log_info "Creating ESP: sector ${BOOT_PART_OFFSET_SECTOR} – $(( BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS ))"
-    parted -s "$IMG_FILE" mkpart ESP fat16 "${BOOT_START}" "${BOOT_END}"
+    # Use sector addressing throughout to avoid boundary collisions between
+    # the ESP end and rootfs start (byte/MiB rounding can overlap by 1 sector).
+    BOOT_START_S="${BOOT_PART_OFFSET_SECTOR}"
+    BOOT_END_S=$(( BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS - 1 ))
+    ROOTFS_START_S=$(( BOOT_PART_OFFSET_SECTOR + BOOT_PART_SIZE_SECTORS ))
+    log_info "Creating ESP: sector ${BOOT_START_S} – ${BOOT_END_S}"
+    parted -s "$IMG_FILE" mkpart ESP fat16 "${BOOT_START_S}s" "${BOOT_END_S}s"
     parted -s "$IMG_FILE" set 1 esp on
-    parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_OFFSET_MB}MiB" 100%
+    log_info "Creating rootfs: sector ${ROOTFS_START_S} – end"
+    parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_START_S}s" 100%
     ROOTFS_PART_NUM=2
 else
     parted -s "$IMG_FILE" mkpart rootfs ext4 "${ROOTFS_OFFSET_MB}MiB" 100%

@@ -1,18 +1,23 @@
 #!/bin/bash
 # set-hostname — generate unique hostname from primary NIC MAC address
-# Runs once on first boot, then disables itself.
+# Runs once on first boot. Retries briefly if NIC isn't enumerated yet.
 
 set -e
 
-# Find first ethernet interface (en*)
-for iface in /sys/class/net/en*; do
-    [ -e "$iface" ] || continue
-    MAC="$(cat "$iface/address" 2>/dev/null)" && break
+# Wait up to 15 seconds for an ethernet interface to appear
+MAC=""
+for attempt in $(seq 1 15); do
+    for iface in /sys/class/net/en*; do
+        [ -e "$iface" ] || continue
+        MAC="$(cat "$iface/address" 2>/dev/null)" && break 2
+    done
+    echo "set-hostname: waiting for ethernet interface (attempt ${attempt}/15) ..." >&2
+    sleep 1
 done
 
 if [ -z "$MAC" ]; then
-    echo "set-hostname: no ethernet interface found, skipping" >&2
-    exit 0
+    echo "set-hostname: no ethernet interface found after 15s, failing" >&2
+    exit 1
 fi
 
 # Last 3 octets, stripped of colons → 6 hex chars
@@ -22,9 +27,9 @@ NEW_HOSTNAME="cpedge-${SUFFIX}"
 # Read current hostname
 OLD_HOSTNAME="$(hostname)"
 
-# Set it
-hostnamectl set-hostname "$NEW_HOSTNAME"
+# Set it (write directly — hostnamectl needs D-Bus/polkit which may not be ready)
 echo "$NEW_HOSTNAME" > /etc/hostname
+hostname "$NEW_HOSTNAME"
 
 # Update /etc/hosts
 if grep -q "$OLD_HOSTNAME" /etc/hosts 2>/dev/null; then
@@ -35,6 +40,9 @@ else
 fi
 
 echo "set-hostname: hostname set to $NEW_HOSTNAME (MAC: $MAC)"
+
+# Mark done so we don't run again
+touch /var/lib/set-hostname.done
 
 # Disable ourselves — one-shot
 systemctl disable set-hostname-firstboot.service 2>/dev/null || true

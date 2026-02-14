@@ -98,10 +98,11 @@ load_config() {
     # Derived paths
     KERNEL_OUT="${KERNELS_OUT}/${KERNEL_VERSION}/${BOARD_CHIP}"
     IMAGE_OUT="${IMAGES_OUT}/${KERNEL_VERSION}/${BOARD_CHIP}"
-    IMAGE_NAME="${board}-cpedgeos-${UBUNTU_VERSION}.img"
+    BUILD_ID="v$(date +%s)"
+    IMAGE_NAME="${board}-cpedgeos-${UBUNTU_VERSION}-${BUILD_ID}.img"
 
     export BUILDER_DIR KERNEL_SRC KERNELS_OUT IMAGES_OUT TMP_DIR
-    export KERNEL_OUT IMAGE_OUT IMAGE_NAME
+    export KERNEL_OUT IMAGE_OUT IMAGE_NAME BUILD_ID
     export UBOOT_SRC RKBIN_SRC
 }
 

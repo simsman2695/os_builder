@@ -1,0 +1,11 @@
+# Force 1000M/full-duplex on GMAC1 (Symbiote internal Ethernet).
+# RTL8211F auto-negotiation is unstable on this board — disable it.
+# Only matches GMAC1 hardware path; inert on boards without GMAC1.
+
+[Match]
+Path=platform-fe1c0000.ethernet
+
+[Link]
+AutoNegotiation=no
+BitsPerSecond=1G
+Duplex=full
